@@ -107,6 +107,16 @@ class CalceAdapter:
                 f"{raw_dir}: не найдено ячеек серий {sorted(series)}; "
                 "сначала выполните scripts/download_calce.sh"
             )
+        # Решение владельца (§18 п.5): ячейки с меняющимся током разряда в
+        # бенчмарк не входят — их таргет зависит от режима, а не от старения.
+        excluded = {
+            str(item) for item in self.config.labels.rule(self.name).get("exclude_cells", [])
+        }
+        grouped = {key: value for key, value in grouped.items() if key not in excluded}
+        if not grouped:
+            raise FileNotFoundError(
+                f"{raw_dir}: все ячейки серий {sorted(series)} исключены правилом exclude_cells"
+            )
         return [
             CellSource(
                 dataset=self.name,
@@ -457,30 +467,43 @@ class CalceAdapter:
         }
 
     @staticmethod
-    def _drop_off_rate_cycles(
-        cycles: pl.DataFrame, bundle: RawBundle, *, tolerance: float
+    def _drop_shallow_charges(
+        cycles: pl.DataFrame, bundle: RawBundle, *, rel: float
     ) -> tuple[pl.DataFrame, int]:
-        """Снять признак опорного с циклов, разряжавшихся не модальным током.
+        """Снять признак опорного с циклов, перенёсших слишком мало заряда.
 
-        Ёмкость зависит от тока разряда (у CS2 типа 3 — до 25% между соседними
-        циклами), поэтому в опорные оставляем только циклы с модальным для этой
-        ячейки током разряда. Для типов 1 и 2 ток и так постоянный, и фильтр
-        ничего не меняет.
+        Правило владельца: «полный» цикл обязан не только дойти до верхней и
+        нижней границы по напряжению, но и перенести существенный заряд. Иначе
+        в конце жизни в опорные попадают циклы, где ячейка была почти полной:
+        они дают заниженную разрядную ёмкость и ложные «восстановления» SOH.
+
+        Порог считается от ``bol`` этой же ячейки — от ёмкости первого
+        опорного цикла. Первый цикл свежей ячейки заряжается полностью, поэтому
+        опорное значение берётся до фильтрации.
         """
-        discharge = bundle.timeseries.filter(pl.col("step_type") == pl.lit("dch"))
-        if discharge.height == 0:
+        candidates = cycles.filter(
+            pl.col("is_reference") & pl.col("capacity_ah").is_not_null()
+        ).sort("cycle_index")
+        if candidates.height == 0:
             return cycles, 0
-        per_cycle = discharge.group_by("cycle_index").agg(
-            pl.col("current_a").median().abs().alias("current_a")
+        bol = float(candidates["capacity_ah"][0])
+        # Перенесённый заряд — сумма максимумов по фазовым типам: charge_ah
+        # внутри фазы считается от её начала (§4.3), поэтому CC и CV надо
+        # складывать, а не брать общий максимум.
+        charge = (
+            bundle.timeseries.filter(pl.col("step_type").is_in(["chg_cc", "chg_cv"]))
+            .group_by(["cycle_index", "step_type"])
+            .agg(pl.col("charge_ah").max().alias("q_phase"))
+            .group_by("cycle_index")
+            .agg(pl.col("q_phase").sum().alias("q_charge"))
         )
-        counts = per_cycle["current_a"].value_counts(sort=True)
-        if counts.height == 0:
-            return cycles, 0
-        modal = float(counts["current_a"][0])
-        off_rate = per_cycle.filter((pl.col("current_a") - modal).abs() > tolerance * modal)[
+        joined = cycles.join(charge, on="cycle_index", how="left").with_columns(
+            pl.col("q_charge").fill_null(0.0)
+        )
+        shallow = joined.filter(pl.col("is_reference") & (pl.col("q_charge") < rel * bol))[
             "cycle_index"
         ]
-        excluded = sorted(int(value) for value in off_rate.to_list())
+        excluded = sorted(int(value) for value in shallow.to_list())
         if not excluded:
             return cycles, 0
         return (
@@ -548,14 +571,14 @@ class CalceAdapter:
                 f"calce: стратегия {strategy!r} не реализована (ожидается every_full_cycle)"
             )
         cycles = bundle.cycles
-        if bool(rule.get("require_modal_discharge_current", False)):
-            cycles, off_rate = self._drop_off_rate_cycles(
-                cycles, bundle, tolerance=float(rule.get("discharge_current_tolerance_rel", 0.05))
-            )
-            if off_rate:
+        min_throughput_rel = float(rule.get("min_charge_throughput_rel", 0.0))
+        if min_throughput_rel > 0:
+            cycles, shallow = self._drop_shallow_charges(cycles, bundle, rel=min_throughput_rel)
+            if shallow:
                 warnings.append(
-                    f"{bundle.cell_id}: {off_rate} циклов разряжались не модальным током "
-                    "и в опорные не попали (ёмкость зависит от тока разряда)"
+                    f"{bundle.cell_id}: {shallow} циклов дошли до границ по напряжению, "
+                    f"но перенесли меньше {min_throughput_rel:.0%}·bol заряда "
+                    "(ячейка была почти полной), в опорные не попали"
                 )
         bundle = RawBundle(cells=bundle.cells, cycles=cycles, timeseries=bundle.timeseries)
 

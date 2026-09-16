@@ -17,6 +17,7 @@ ingest ячейки заменяет её строки, а не дублируе
 
 from __future__ import annotations
 
+import shutil
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 
@@ -32,6 +33,7 @@ from bsb.schema import (
 )
 
 __all__ = [
+    "clear_dataset_parts",
     "compact",
     "list_cells",
     "parts_dir",
@@ -47,6 +49,32 @@ def parts_dir(config: BenchmarkConfig, dataset: str | None = None) -> Path:
     """Каталог промежуточного слоя (всего или одного датасета)."""
     root = config.paths.unified_dir / "parts"
     return root / dataset if dataset else root
+
+
+def clear_dataset_parts(config: BenchmarkConfig, dataset: str, *, archive: bool = True) -> Path:
+    """Очистить промежуточный слой датасета перед полным переразбором.
+
+    ``ingest`` — это полное обновление датасета, а не дополнение: ячейка,
+    исчезнувшая из сырых данных или исключённая правилом конфига, обязана
+    исчезнуть и из хранилища, иначе она молча останется в унифицированном
+    уровне (так ``exclude_cells`` для CALCE сначала не подействовал).
+
+    Старые файлы переносятся в ``parts/_stale/<dataset>`` — их можно сравнить,
+    но в унифицированный уровень они уже не попадут.
+    """
+    target = parts_dir(config, dataset)
+    if not target.is_dir():
+        return target
+    if archive:
+        stale = target.parent / "_stale" / dataset
+        if stale.is_dir():
+            shutil.rmtree(stale)
+        stale.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(target), str(stale))
+    else:
+        shutil.rmtree(target)
+    target.mkdir(parents=True, exist_ok=True)
+    return target
 
 
 def _upsert(path: Path, frame: pl.DataFrame, *, key: str) -> pl.DataFrame:

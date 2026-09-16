@@ -23,7 +23,7 @@ from bsb.fragments import generate_fragments, strip_labels
 from bsb.ingest import ADAPTERS, get_adapter
 from bsb.schema import SchemaViolation, validate_bundle, validate_fragments
 from bsb.splits import CellLeakageError, assert_no_cell_leakage, load_splits, split_path
-from bsb.store import compact, list_cells, parts_dir, write_bundle
+from bsb.store import clear_dataset_parts, compact, list_cells, parts_dir, write_bundle
 from bsb.validate_submission import (
     expected_test_ids,
     read_submission,
@@ -172,6 +172,12 @@ def _cmd_ingest(config: BenchmarkConfig, args: argparse.Namespace) -> int:
     if not sources:
         print(f"в {raw_dir} не найдено ни одной ячейки", file=sys.stderr)
         return EXIT_FAILURE
+    if args.limit is None:
+        # Полный прогон заменяет датасет целиком: ячейки, которых больше нет в
+        # сырых данных или которые исключены правилом конфига, уходят из
+        # хранилища. Прогон с --limit ничего не чистит: он по определению
+        # частичный и не должен стирать остальное.
+        clear_dataset_parts(config, args.dataset)
     print(f"{args.dataset}: найдено {len(sources)} ячеек в {raw_dir}")
     warnings: list[str] = []
     failures: list[tuple[str, str]] = []
