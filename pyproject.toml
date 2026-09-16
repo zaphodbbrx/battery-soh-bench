@@ -36,6 +36,7 @@ bsb = ["py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+norecursedirs = [".scratch", ".venv", "data"]
 pythonpath = ["tests"]
 addopts = "-q"
 filterwarnings = ["error::DeprecationWarning:bsb.*"]
@@ -44,6 +45,8 @@ filterwarnings = ["error::DeprecationWarning:bsb.*"]
 line-length = 100
 target-version = "py311"
 src = ["src", "tests"]
+# .scratch/ — клоны чужих репозиториев для оценки (§17.5), их стиль не наш.
+extend-exclude = [".scratch", ".venv"]
 
 [tool.ruff.lint]
 select = [

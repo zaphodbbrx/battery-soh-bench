@@ -1,8 +1,9 @@
 """Командная строка ``bsb`` (ТЗ §13).
 
-Реализованы ``config-check``, ``splits-check``, ``compact``, ``ingest`` и
-``fragments``. Команды, реализуемые позже, честно падают с кодом 3 и называют
-фазу плана §15, а не делают вид, что что-то посчитали.
+Реализованы ``config-check``, ``splits-check``, ``compact``, ``ingest``,
+``fragments``, ``validate`` и ``eval``. Команды, реализуемые позже, честно
+падают с кодом 3 и называют фазу плана §15, а не делают вид, что что-то
+посчитали.
 """
 
 from __future__ import annotations
@@ -17,11 +18,17 @@ import polars as pl
 from bsb import __version__
 from bsb.config import BenchmarkConfig, ConfigError, load_config
 from bsb.dataset import iter_bundles, read_split_cell_ids
+from bsb.eval import render_report, run_eval, save_results
 from bsb.fragments import generate_fragments, strip_labels
 from bsb.ingest import ADAPTERS, get_adapter
 from bsb.schema import SchemaViolation, validate_bundle, validate_fragments
 from bsb.splits import CellLeakageError, assert_no_cell_leakage, load_splits, split_path
 from bsb.store import compact, list_cells, parts_dir, write_bundle
+from bsb.validate_submission import (
+    expected_test_ids,
+    read_submission,
+    validate_submission,
+)
 
 __all__ = ["main"]
 
@@ -34,8 +41,6 @@ _PENDING: dict[str, str] = {
     "labels": "фаза 2",
     "noise-floor": "фаза 8",
     "baseline": "фаза 8",
-    "eval": "фаза 7",
-    "validate": "фаза 7",
 }
 
 
@@ -92,6 +97,7 @@ def build_parser() -> argparse.ArgumentParser:
     eval_parser.add_argument(
         "--hard-mode", action="store_true", help="бонусная номинация LFP (ТЗ §9)"
     )
+    eval_parser.add_argument("--out", type=Path, default=None, help="куда писать results.json")
 
     validate_parser = subparsers.add_parser("validate", help="проверить формат сабмита")
     validate_parser.add_argument("--submission", type=Path, required=True)
@@ -265,6 +271,34 @@ def _cmd_fragments(config: BenchmarkConfig, args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _cmd_validate(config: BenchmarkConfig, args: argparse.Namespace) -> int:
+    """Команда ``validate``: проверить формат сабмита (ТЗ §11)."""
+    report = validate_submission(
+        args.submission, expected_ids=expected_test_ids(config), config=config
+    )
+    print(report.render())
+    return EXIT_OK if report.ok else EXIT_FAILURE
+
+
+def _cmd_eval(config: BenchmarkConfig, args: argparse.Namespace) -> int:
+    """Команда ``eval``: посчитать метрики сабмита (ТЗ §10)."""
+    report = validate_submission(
+        args.submission, expected_ids=expected_test_ids(config), config=config
+    )
+    if not report.ok:
+        print(report.render(), file=sys.stderr)
+        print("метрики не считаются, пока сабмит не прошёл валидатор (ТЗ §11)", file=sys.stderr)
+        return EXIT_FAILURE
+    submission = read_submission(args.submission)
+    result = run_eval(config, submission, hard_mode=args.hard_mode)
+    result["submission_path"] = str(args.submission)
+    result["submission_bytes"] = Path(args.submission).stat().st_size
+    save_results(result, args.out or config.paths.results_path)
+    print(render_report(result))
+    print(f"\nresults.json: {args.out or config.paths.results_path}")
+    return EXIT_OK
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Точка входа ``bsb``. Возвращает код выхода процесса."""
     parser = build_parser()
@@ -285,6 +319,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             "compact": lambda cfg: _cmd_compact(cfg, args),
             "ingest": lambda cfg: _cmd_ingest(cfg, args),
             "fragments": lambda cfg: _cmd_fragments(cfg, args),
+            "validate": lambda cfg: _cmd_validate(cfg, args),
+            "eval": lambda cfg: _cmd_eval(cfg, args),
         }[command]
         return handler(config)
     except (ConfigError, FileNotFoundError, SchemaViolation, CellLeakageError, KeyError) as exc:
