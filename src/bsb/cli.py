@@ -154,10 +154,18 @@ def _cmd_ingest(config: BenchmarkConfig, args: argparse.Namespace) -> int:
         return EXIT_FAILURE
     print(f"{args.dataset}: найдено {len(sources)} ячеек в {raw_dir}")
     warnings: list[str] = []
+    failures: list[tuple[str, str]] = []
     for index, source in enumerate(sources, start=1):
-        bundle = adapter.mark_reference_cycles(adapter.load_cell(source))
-        warnings.extend(validate_bundle(bundle))
-        write_bundle(config, bundle, dataset=args.dataset)
+        try:
+            bundle = adapter.mark_reference_cycles(adapter.load_cell(source))
+            warnings.extend(f"{source.cell_id}: {item}" for item in validate_bundle(bundle))
+            write_bundle(config, bundle, dataset=args.dataset)
+        except (SchemaViolation, ValueError, KeyError) as exc:
+            # Одна плохая ячейка не должна ронять разбор всего датасета:
+            # причина попадает в отчёт, остальные ячейки обрабатываются.
+            failures.append((source.cell_id, str(exc)))
+            print(f"  [{index}/{len(sources)}] {source.cell_id}: ОШИБКА: {exc}", file=sys.stderr)
+            continue
         print(
             f"  [{index}/{len(sources)}] {source.cell_id}: {bundle.cycles.height} циклов, "
             f"{bundle.timeseries.height} строк timeseries"
@@ -165,6 +173,8 @@ def _cmd_ingest(config: BenchmarkConfig, args: argparse.Namespace) -> int:
     for warning in warnings:
         print(f"предупреждение: {warning}", file=sys.stderr)
     print(f"записано в {parts_dir(config, args.dataset)}")
+    if failures:
+        print(f"не разобрано ячеек: {len(failures)} из {len(sources)}", file=sys.stderr)
     if args.compact:
         return _cmd_compact(config, argparse.Namespace(datasets=args.dataset))
     return EXIT_OK

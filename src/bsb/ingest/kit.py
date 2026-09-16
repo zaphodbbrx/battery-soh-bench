@@ -14,7 +14,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from bsb.config import BenchmarkConfig
-from bsb.ingest.base import CellSource
+from bsb.ingest.base import CellSource, RawBundle
 from bsb.schema import CellBundle
 
 __all__ = ["KitAdapter"]
@@ -33,10 +33,10 @@ class KitAdapter:
         """Найти ячейки в ``raw_dir`` (фаза 5)."""
         raise NotImplementedError("KitAdapter.discover — фаза 5 плана §15")
 
-    def load_cell(self, src: CellSource) -> CellBundle:
+    def load_cell(self, src: CellSource) -> RawBundle:
         """Потоково разобрать одну ячейку (фаза 5)."""
         raise NotImplementedError("KitAdapter.load_cell — фаза 5 плана §15")
 
-    def mark_reference_cycles(self, bundle: CellBundle) -> CellBundle:
+    def mark_reference_cycles(self, bundle: RawBundle) -> CellBundle:
         """Разметить опорные циклы по таблице check-up (фаза 5)."""
         raise NotImplementedError("KitAdapter.mark_reference_cycles — фаза 5 плана §15")

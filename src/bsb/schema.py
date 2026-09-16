@@ -49,6 +49,7 @@ __all__ = [
     "SchemaViolation",
     "SohSource",
     "StepType",
+    "check_structure",
     "conform",
     "empty_frame",
     "validate_bundle",
@@ -236,7 +237,7 @@ def conform(
         raise SchemaViolation(f"{name}: не удалось привести типы к схеме §4: {exc}") from exc
 
 
-def _check_structure(
+def check_structure(
     df: pl.DataFrame,
     schema: Mapping[str, pl.DataType],
     *,
@@ -309,7 +310,7 @@ def validate_cells(df: pl.DataFrame, *, strict: bool = True) -> list[str]:
     Критично: схема, уникальность ``cell_id``, префикс ``{dataset}_``,
     положительные ёмкости, отсутствие null в обязательных полях.
     """
-    _check_structure(df, CELLS_SCHEMA, name="cells")
+    check_structure(df, CELLS_SCHEMA, name="cells")
     if df.height and df["cell_id"].is_duplicated().any():
         raise SchemaViolation(
             f"cells: cell_id не уникален: {_rows(df, _duplicates(df, ['cell_id']))}"
@@ -371,7 +372,7 @@ def validate_cycles(df: pl.DataFrame, *, strict: bool = True) -> list[str]:
     ``cycle_index >= 1``, ``soh`` в ``(0, 1.2]``, согласованность
     ``is_reference`` / ``soh_source`` / ``soh_gap_cycles``.
     """
-    _check_structure(df, CYCLES_SCHEMA, name="cycles")
+    check_structure(df, CYCLES_SCHEMA, name="cycles")
     if df.height == 0:
         return []
     bad_id = df["cell_id"].is_null()
@@ -454,7 +455,7 @@ def validate_timeseries(
 
     Возвращает замечания по точности интегрирования ``charge_ah``.
     """
-    _check_structure(df, TIMESERIES_SCHEMA, name="timeseries")
+    check_structure(df, TIMESERIES_SCHEMA, name="timeseries")
     if df.height == 0:
         if require_nonempty:
             raise SchemaViolation("timeseries: пустой кадр")
@@ -608,7 +609,7 @@ def validate_fragments(
     """
     schema = FRAGMENTS_SCHEMA if labeled else FRAGMENTS_UNLABELED_SCHEMA
     name = "fragments" if labeled else "fragments (unlabeled)"
-    _check_structure(df, schema, name=name)
+    check_structure(df, schema, name=name)
     if df.height == 0:
         return []
     dup = df["fragment_id"].is_duplicated()

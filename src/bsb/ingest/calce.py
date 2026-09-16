@@ -13,7 +13,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from bsb.config import BenchmarkConfig
-from bsb.ingest.base import CellSource
+from bsb.ingest.base import CellSource, RawBundle
 from bsb.schema import CellBundle
 
 __all__ = ["CalceAdapter"]
@@ -32,10 +32,10 @@ class CalceAdapter:
         """Найти ячейки в ``raw_dir`` (фаза 4)."""
         raise NotImplementedError("CalceAdapter.discover — фаза 4 плана §15")
 
-    def load_cell(self, src: CellSource) -> CellBundle:
+    def load_cell(self, src: CellSource) -> RawBundle:
         """Прочитать одну ячейку (фаза 4)."""
         raise NotImplementedError("CalceAdapter.load_cell — фаза 4 плана §15")
 
-    def mark_reference_cycles(self, bundle: CellBundle) -> CellBundle:
+    def mark_reference_cycles(self, bundle: RawBundle) -> CellBundle:
         """Разметить опорные циклы по правилу ``every_full_cycle`` (фаза 4)."""
         raise NotImplementedError("CalceAdapter.mark_reference_cycles — фаза 4 плана §15")

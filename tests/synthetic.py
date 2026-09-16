@@ -2,7 +2,8 @@
 
 Используется round-trip тестом §14 («синтетическая ячейка проходит
 ingest -> labels -> fragments и восстанавливается») и любым тестом, которому
-нужен валидный :class:`~bsb.schema.CellBundle` без реальных данных.
+нужен валидный :class:`~bsb.ingest.base.RawBundle` или
+:class:`~bsb.schema.CellBundle` без реальных данных.
 """
 
 from __future__ import annotations
@@ -10,10 +11,12 @@ from __future__ import annotations
 import numpy as np
 import polars as pl
 
-from bsb.ingest.base import build_bundle, integrate_charge
+from bsb.config import load_config
+from bsb.ingest.base import RawBundle, build_raw_bundle, integrate_charge
+from bsb.labels import build_labels
 from bsb.schema import CellBundle
 
-__all__ = ["synth_bundle", "synth_cycle_timeseries"]
+__all__ = ["synth_bundle", "synth_cycle_timeseries", "synth_raw_bundle"]
 
 
 def synth_cycle_timeseries(
@@ -60,7 +63,7 @@ def synth_cycle_timeseries(
     return pl.concat(frames)
 
 
-def synth_bundle(
+def synth_raw_bundle(
     cell_id: str = "oxford_Cell1",
     *,
     n_cycles: int = 6,
@@ -71,18 +74,20 @@ def synth_bundle(
     form_factor: str = "pouch",
     nominal_capacity_ah: float = 0.74,
     temperature_setpoint_c: float = 40.0,
-) -> CellBundle:
-    """Валидный :class:`CellBundle` с линейно деградирующей ёмкостью."""
+    non_reference_cycles: tuple[int, ...] = (),
+) -> RawBundle:
+    """Ячейка до разметки: линейно деградирующая ёмкость и полный timeseries.
+
+    ``non_reference_cycles`` помечает перечисленные (1-based) циклы как
+    неопорные — нужно тестам интерполяции и отбрасывания.
+    """
     capacities = [bol_capacity_ah * (1.0 - fade_per_cycle * index) for index in range(n_cycles)]
     cycles = pl.DataFrame(
         {
             "cell_id": [cell_id] * n_cycles,
             "cycle_index": np.arange(1, n_cycles + 1, dtype=np.int32),
             "capacity_ah": capacities,
-            "is_reference": [True] * n_cycles,
-            "soh": [capacity / bol_capacity_ah for capacity in capacities],
-            "soh_source": ["measured"] * n_cycles,
-            "soh_gap_cycles": [0] * n_cycles,
+            "is_reference": [index not in non_reference_cycles for index in range(1, n_cycles + 1)],
         }
     )
     timeseries = pl.concat(
@@ -94,10 +99,14 @@ def synth_bundle(
         "chemistry": chemistry,
         "form_factor": form_factor,
         "nominal_capacity_ah": nominal_capacity_ah,
-        "bol_capacity_ah": bol_capacity_ah,
         "temperature_setpoint_c": temperature_setpoint_c,
         "charge_protocol": "CC-CV 0.5C to 4.2V, cutoff 0.05A",
         "batch_id": None,
         "notes": None,
     }
-    return build_bundle(cell, cycles, timeseries)
+    return build_raw_bundle(cell, cycles, timeseries)
+
+
+def synth_bundle(**kwargs: object) -> CellBundle:
+    """Размеченный бандл по схеме §4: ``synth_raw_bundle`` + ``build_labels``."""
+    return build_labels(synth_raw_bundle(**kwargs), load_config())  # type: ignore[arg-type]

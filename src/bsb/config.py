@@ -33,6 +33,7 @@ __all__ = [
     "LabelsConfig",
     "LeakageProbeConfig",
     "NoiseFloorConfig",
+    "OxfordConfig",
     "PathsConfig",
     "SplitsConfig",
     "StepLabelingConfig",
@@ -264,12 +265,26 @@ class CalceConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class OxfordConfig:
+    """Параметры ingest Oxford (ТЗ §6.1, §17.3).
+
+    В характеризационном цикле четыре подшага: ``C1ch`` / ``C1dc`` (1C) и
+    ``OCVch`` / ``OCVdc`` (псевдо-OCV, 40 мА = C/18.5). Какой из зарядов
+    попадает во фрагменты — выбор владельца; по умолчанию медленный OCV-заряд.
+    """
+
+    charge_step: str
+    discharge_step: str
+    max_step_gap_s: float
+
+
+@dataclass(frozen=True, slots=True)
 class IngestConfig:
     """Параметры ingest по датасетам (ТЗ §6)."""
 
     kit: KitConfig
     calce: CalceConfig
-    oxford: Mapping[str, Any] = field(default_factory=dict)
+    oxford: OxfordConfig
     sandia: Mapping[str, Any] = field(default_factory=dict)
 
 
@@ -584,6 +599,16 @@ def _parse_ingest(value: Any) -> IngestConfig:
         raise ConfigError("ingest.kit.target_resolution_s: должен быть > 0")
     calce_data = _mapping(data["calce"], "ingest.calce")
     _check_keys(calce_data, "ingest.calce", required=("series",))
+    oxford_data = _mapping(data["oxford"], "ingest.oxford")
+    _check_keys(
+        oxford_data,
+        "ingest.oxford",
+        required=("charge_step", "discharge_step", "max_step_gap_s"),
+        optional=("comment",),
+    )
+    gap = _as_float(oxford_data["max_step_gap_s"], "ingest.oxford.max_step_gap_s")
+    if gap <= 0:
+        raise ConfigError("ingest.oxford.max_step_gap_s: должен быть > 0")
     return IngestConfig(
         kit=KitConfig(
             target_resolution_s=resolution,
@@ -595,7 +620,11 @@ def _parse_ingest(value: Any) -> IngestConfig:
             ),
         ),
         calce=CalceConfig(series=_as_str_tuple(calce_data["series"], "ingest.calce.series")),
-        oxford=dict(_mapping(data["oxford"], "ingest.oxford")),
+        oxford=OxfordConfig(
+            charge_step=_as_str(oxford_data["charge_step"], "ingest.oxford.charge_step"),
+            discharge_step=_as_str(oxford_data["discharge_step"], "ingest.oxford.discharge_step"),
+            max_step_gap_s=gap,
+        ),
         sandia=dict(_mapping(data["sandia"], "ingest.sandia")),
     )
 

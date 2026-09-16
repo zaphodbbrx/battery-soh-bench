@@ -14,7 +14,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from bsb.config import BenchmarkConfig
-from bsb.ingest.base import CellSource
+from bsb.ingest.base import CellSource, RawBundle
 from bsb.schema import CellBundle
 
 __all__ = ["SandiaAdapter"]
@@ -33,10 +33,10 @@ class SandiaAdapter:
         """Найти ячейки в ``raw_dir`` (фаза 6)."""
         raise NotImplementedError("SandiaAdapter.discover — фаза 6 плана §15")
 
-    def load_cell(self, src: CellSource) -> CellBundle:
+    def load_cell(self, src: CellSource) -> RawBundle:
         """Прочитать одну ячейку (фаза 6)."""
         raise NotImplementedError("SandiaAdapter.load_cell — фаза 6 плана §15")
 
-    def mark_reference_cycles(self, bundle: CellBundle) -> CellBundle:
+    def mark_reference_cycles(self, bundle: RawBundle) -> CellBundle:
         """Разметить capacity check как опорные циклы (фаза 6)."""
         raise NotImplementedError("SandiaAdapter.mark_reference_cycles — фаза 6 плана §15")
