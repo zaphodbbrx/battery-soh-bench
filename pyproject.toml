@@ -1,0 +1,76 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "battery-soh-bench"
+version = "0.1.0"
+description = "Toolkit for the student competition on Li-ion cell SOH estimation from a charge-curve fragment"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    "polars>=1.0",
+    "pyarrow>=15.0",
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "scikit-learn>=1.3",
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
+
+[project.scripts]
+bsb = "bsb.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+bsb = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["tests"]
+addopts = "-q"
+filterwarnings = ["error::DeprecationWarning:bsb.*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "SIM",  # flake8-simplify
+    "RUF",  # ruff-specific
+    "ANN",  # flake8-annotations (типизация публичных API, ТЗ §2)
+    "D",    # pydocstyle
+]
+ignore = [
+    "ANN401", # Any в **kwargs — сознательно
+    "D203",   # конфликтует с D211
+    "D213",   # конфликтует с D212
+    # Весь текст проекта русский: «ТЗ» и «А·ч» неотличимы от латиницы/цифр,
+    # правило об ambiguous unicode здесь даёт только шум.
+    "RUF001",
+    "RUF002",
+    "RUF003",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["ANN", "D"]
+"scripts/*" = ["ANN", "D"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"
