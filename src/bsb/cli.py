@@ -1,8 +1,8 @@
 """Командная строка ``bsb`` (ТЗ §13).
 
-Команды каркаса (``config-check``, ``splits-check``, ``compact``, ``ingest``)
-работают уже в фазе 0; команды, реализуемые позже, честно падают с кодом 3 и
-называют фазу плана §15, а не делают вид, что что-то посчитали.
+Реализованы ``config-check``, ``splits-check``, ``compact``, ``ingest`` и
+``fragments``. Команды, реализуемые позже, честно падают с кодом 3 и называют
+фазу плана §15, а не делают вид, что что-то посчитали.
 """
 
 from __future__ import annotations
@@ -12,10 +12,14 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+import polars as pl
+
 from bsb import __version__
 from bsb.config import BenchmarkConfig, ConfigError, load_config
+from bsb.dataset import iter_bundles, read_split_cell_ids
+from bsb.fragments import generate_fragments, strip_labels
 from bsb.ingest import ADAPTERS, get_adapter
-from bsb.schema import SchemaViolation, validate_bundle
+from bsb.schema import SchemaViolation, validate_bundle, validate_fragments
 from bsb.splits import CellLeakageError, assert_no_cell_leakage, load_splits, split_path
 from bsb.store import compact, list_cells, parts_dir, write_bundle
 
@@ -28,7 +32,6 @@ EXIT_NOT_IMPLEMENTED = 3
 #: Команда → фаза плана §15, в которой она реализуется.
 _PENDING: dict[str, str] = {
     "labels": "фаза 2",
-    "fragments": "фаза 3",
     "noise-floor": "фаза 8",
     "baseline": "фаза 8",
     "eval": "фаза 7",
@@ -70,6 +73,12 @@ def build_parser() -> argparse.ArgumentParser:
     fragments_parser = subparsers.add_parser("fragments", help="сгенерировать фрагменты сплита")
     fragments_parser.add_argument("--split", required=True, choices=("train", "val", "test"))
     fragments_parser.add_argument("--mode", default="fixed", choices=("fixed", "sampling"))
+    fragments_parser.add_argument(
+        "--cells", default=None, help="явный список cell_id через запятую (отладка)"
+    )
+    fragments_parser.add_argument(
+        "--out", type=Path, default=None, help="куда писать (обязателен вместе с --cells)"
+    )
 
     baseline_parser = subparsers.add_parser("baseline", help="посчитать бейзлайн")
     baseline_parser.add_argument(
@@ -180,6 +189,82 @@ def _cmd_ingest(config: BenchmarkConfig, args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _cmd_fragments(config: BenchmarkConfig, args: argparse.Namespace) -> int:
+    """Команда ``fragments``: сгенерировать фрагменты сплита (ТЗ §7).
+
+    Режим ``sampling`` намеренно не пишет артефакт: по §7 это аугментация на
+    лету, и коммитить её вместо фиксированного набора нельзя.
+    """
+    if args.mode == "sampling":
+        print(
+            "режим sampling не создаёт артефакт: по ТЗ §7 это аугментация на лету. "
+            "Используйте bsb.dataset.sample_fragments(...) в обучении.",
+            file=sys.stderr,
+        )
+        return EXIT_FAILURE
+    if args.cells and args.out is None:
+        print(
+            "--cells без --out запрещён: частичный список не должен выглядеть как сплит "
+            "(файл сплита перезаписывать нельзя).",
+            file=sys.stderr,
+        )
+        return EXIT_FAILURE
+
+    if args.cells:
+        cell_ids = [item.strip() for item in args.cells.split(",") if item.strip()]
+    else:
+        cell_ids = read_split_cell_ids(config, args.split)
+        if not cell_ids:
+            print(
+                f"сплит {args.split} пуст: заполните {split_path(config, args.split)} "
+                "(фаза 7 плана §15) или используйте --cells для отладки",
+                file=sys.stderr,
+            )
+            return EXIT_FAILURE
+
+    frames = []
+    warnings: list[str] = []
+    for bundle in iter_bundles(config, cell_ids):
+        frame = generate_fragments(bundle, config)
+        warnings.extend(
+            f"{bundle.cell_id}: {item}"
+            for item in validate_fragments(frame, labeled=True, n_points=config.fragment.n_points)
+        )
+        if frame.height == 0:
+            print(f"  {bundle.cell_id}: ни одного окна не построено", file=sys.stderr)
+        frames.append(frame)
+    fragments = pl.concat(frames, how="vertical") if frames else pl.DataFrame()
+    for warning in warnings:
+        print(f"предупреждение: {warning}", file=sys.stderr)
+    if fragments.height == 0:
+        print(
+            "фрагментов не построено: проверьте fragment.phase и min_points_in_window",
+            file=sys.stderr,
+        )
+        return EXIT_FAILURE
+    validate_fragments(fragments, labeled=True, n_points=config.fragment.n_points)
+
+    if args.out is not None:
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        labeled_path = args.out
+        unlabeled_path = None
+    else:
+        labeled_path = config.paths.fragments_path(args.split, labeled=True)
+        unlabeled_path = (
+            config.paths.fragments_path(args.split, labeled=False) if args.split == "test" else None
+        )
+        labeled_path.parent.mkdir(parents=True, exist_ok=True)
+    fragments.write_parquet(labeled_path)
+    print(f"фрагментов: {fragments.height} ({len(cell_ids)} ячеек)")
+    print(f"эталон:      {labeled_path}")
+    if unlabeled_path is not None:
+        test_frame = strip_labels(fragments)
+        validate_fragments(test_frame, labeled=False, n_points=config.fragment.n_points)
+        test_frame.write_parquet(unlabeled_path)
+        print(f"участникам:  {unlabeled_path}")
+    return EXIT_OK
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Точка входа ``bsb``. Возвращает код выхода процесса."""
     parser = build_parser()
@@ -199,6 +284,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "splits_check": lambda cfg: _cmd_splits_check(cfg),
             "compact": lambda cfg: _cmd_compact(cfg, args),
             "ingest": lambda cfg: _cmd_ingest(cfg, args),
+            "fragments": lambda cfg: _cmd_fragments(cfg, args),
         }[command]
         return handler(config)
     except (ConfigError, FileNotFoundError, SchemaViolation, CellLeakageError, KeyError) as exc:

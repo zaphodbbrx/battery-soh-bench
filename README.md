@@ -30,7 +30,7 @@ bsb config-check                          # проверить конфиг
 bsb ingest --dataset oxford --raw data/raw/oxford
 bsb compact                               # собрать унифицированный уровень
 bsb splits-check                          # утечка ячеек между сплитами
-bsb fragments --split val --mode fixed
+bsb fragments --split val --mode fixed        # артефакт val/test (после фазы 7)
 bsb baseline --model elastic_net
 bsb eval --submission submission.csv
 ```
@@ -68,7 +68,8 @@ tests/                   round-trip, детерминизм, утечки, ва�
 | 8 | Сетка `delta_v` (§10) | `[0.05, 0.1, 0.15, 0.2]` — **открыто** |
 | 9 | BatteryML как основа адаптеров (§17.5) | Свои адаптеры — **открыто** |
 | — | Подшаг заряда Oxford: `OCVch` (C/18.5) или `C1ch` (1C) | `OCVch` по §17.3, меняется в `ingest.oxford.charge_step` |
-| — | Неполные характеризации Oxford (2 из 519) | Помечены в `notes`; отбрасывать или нет — решает владелец |
+| — | Неполные характеризации Oxford (2 из 519) | Решено: `require_full_charge` исключает их из опорных; 517 измерений |
+| — | Подшаг заряда Oxford: `OCVch` (C/18.5) или `C1ch` (1C) | `OCVch` по §17.3, меняется в `ingest.oxford.charge_step` |
 | 10 | Порог пробы на утечку (§12.3) | `max_relative_improvement = 0.15` — **открыто** |
 
 ## Данные
@@ -89,7 +90,7 @@ python scripts/acceptance_plots.py --dataset oxford --cells 5
 | 0 | схема §4, `benchmark.yaml`, каркас, тесты, CI | закрыта |
 | 1 | адаптер Oxford end-to-end + приёмка по графикам | закрыта, ждёт вашего просмотра `reports/acceptance_oxford.png` |
 | 2 | `labels.py`, правила опорных циклов | арифметика §5 готова; правила по Sandia и KIT — за вами |
-| 3 | `fragments.py` | не начата |
+| 3 | `fragments.py` | закрыта: `fixed` + детерминизм + `sampling` через `bsb.dataset` |
 | 4–6 | адаптеры CALCE, KIT, Sandia | не начаты |
 | 7–8b | сплиты, `eval.py`, валидатор, бейзлайны | не начаты |
 

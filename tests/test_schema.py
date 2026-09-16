@@ -368,18 +368,27 @@ def test_bundle_rejects_foreign_cell_rows(synthetic_bundle: CellBundle) -> None:
         validate_bundle(broken)
 
 
-def test_bundle_rejects_timeseries_cycles_missing_from_cycles(synthetic_bundle: CellBundle) -> None:
-    """Цикл, посчитанный в timeseries, обязан быть в cycles."""
-    extra = synthetic_bundle.timeseries.with_columns(
-        pl.when(pl.col("cycle_index") == 1)
-        .then(pl.lit(99, dtype=pl.Int32))
-        .otherwise(pl.col("cycle_index"))
-        .alias("cycle_index")
+def test_bundle_allows_timeseries_superset(synthetic_bundle: CellBundle) -> None:
+    """§5.1: timeseries хранит все разобранные циклы, включая неразмеченные."""
+    extra_cycle = synthetic_bundle.timeseries.filter(pl.col("cycle_index") == 6).with_columns(
+        pl.lit(99, dtype=pl.Int32).alias("cycle_index")
     )
+    bundle = CellBundle(
+        cells=synthetic_bundle.cells,
+        cycles=synthetic_bundle.cycles,
+        timeseries=pl.concat([synthetic_bundle.timeseries, extra_cycle], how="vertical"),
+    )
+    warnings = validate_bundle(bundle)
+    assert any("вне бенчмарка" in warning for warning in warnings)
+
+
+def test_bundle_rejects_labelled_cycle_without_timeseries(synthetic_bundle: CellBundle) -> None:
+    """Размеченный цикл без временного ряда — ошибка: фрагменты не построить."""
+    trimmed = synthetic_bundle.timeseries.filter(pl.col("cycle_index") != 6)
     broken = CellBundle(
-        cells=synthetic_bundle.cells, cycles=synthetic_bundle.cycles, timeseries=extra
+        cells=synthetic_bundle.cells, cycles=synthetic_bundle.cycles, timeseries=trimmed
     )
-    with pytest.raises(SchemaViolation, match="отсутствуют в cycles"):
+    with pytest.raises(SchemaViolation, match="отсутствуют в timeseries"):
         validate_bundle(broken)
 
 

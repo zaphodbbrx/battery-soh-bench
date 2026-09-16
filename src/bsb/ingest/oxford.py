@@ -320,6 +320,47 @@ class OxfordAdapter:
         return segments
 
     @staticmethod
+    def _drop_incomplete_charges(
+        cycles: pl.DataFrame, bundle: RawBundle
+    ) -> tuple[pl.DataFrame, list[int]]:
+        """Снять признак опорного цикла там, где заряд не дошёл до верха.
+
+        Решение владельца (``require_full_charge``): просадка напряжения на
+        стыке «конец заряда -> начало разряда» больше ``JUNCTION_DROP_V``
+        означает неполный заряд и заниженную разрядную ёмкость, поэтому такая
+        характеризация в опорные не попадает.
+        """
+        charge = (
+            bundle.timeseries.filter(pl.col("step_type") == pl.lit("chg_cc"))
+            .group_by("cycle_index")
+            .agg(pl.col("voltage_v").last().alias("v_charge_end"))
+        )
+        discharge = (
+            bundle.timeseries.filter(pl.col("step_type") == pl.lit("dch"))
+            .group_by("cycle_index")
+            .agg(pl.col("voltage_v").first().alias("v_discharge_start"))
+        )
+        junction = charge.join(discharge, on="cycle_index", how="inner").with_columns(
+            (pl.col("v_charge_end") - pl.col("v_discharge_start")).alias("junction_drop")
+        )
+        excluded = sorted(
+            int(value)
+            for value in junction.filter(pl.col("junction_drop") > JUNCTION_DROP_V)[
+                "cycle_index"
+            ].to_list()
+        )
+        if not excluded:
+            return cycles, []
+        return (
+            cycles.with_columns(
+                (pl.col("is_reference") & ~pl.col("cycle_index").is_in(excluded)).alias(
+                    "is_reference"
+                )
+            ),
+            excluded,
+        )
+
+    @staticmethod
     def _compose_notes(notes: list[str]) -> str | None:
         """Собрать поле ``notes`` из замечаний разбора (ТЗ §4.1)."""
         if not notes:
@@ -362,6 +403,15 @@ class OxfordAdapter:
                     f"отличается от C/18.5 ({slow_discharge_a * 1000:.1f} мА) больше чем на "
                     f"{tolerance:.0%}"
                 )
+        cycles = bundle.cycles
+        if bool(rule.get("require_full_charge", False)):
+            cycles, excluded = self._drop_incomplete_charges(cycles, bundle)
+            if excluded:
+                warnings.append(
+                    f"{bundle.cell_id}: из опорных исключены характеризации с неполным "
+                    f"зарядом: {excluded} (require_full_charge)"
+                )
+        bundle = RawBundle(cells=bundle.cells, cycles=cycles, timeseries=bundle.timeseries)
         reference = bundle.cycles.filter(
             pl.col("is_reference") & pl.col("capacity_ah").is_not_null()
         )

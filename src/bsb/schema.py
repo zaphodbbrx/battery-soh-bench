@@ -683,10 +683,21 @@ def validate_bundle(bundle: CellBundle, *, strict: bool = True) -> list[str]:
         raise SchemaViolation(f"CellBundle {cell_id}: чужие cell_id в кадрах: {sorted(foreign)}")
     cycle_ids = set(bundle.cycles["cycle_index"].to_list())
     series_ids = set(bundle.timeseries["cycle_index"].to_list())
-    if not series_ids <= cycle_ids:
+    # Каждый размеченный цикл обязан иметь временной ряд, иначе фрагменты не
+    # построить. Обратное неверно: timeseries хранит все разобранные циклы, а
+    # cycles — только те, что попали в бенчмарк (§5.1: рабочие циклы остаются
+    # в хранилище, но метки не получают).
+    if not cycle_ids <= series_ids:
         raise SchemaViolation(
-            f"CellBundle {cell_id}: циклы в timeseries отсутствуют в cycles: "
-            f"{sorted(series_ids - cycle_ids)[:10]}"
+            f"CellBundle {cell_id}: размеченные циклы отсутствуют в timeseries: "
+            f"{sorted(cycle_ids - series_ids)[:10]}"
+        )
+    unlabelled = sorted(series_ids - cycle_ids)
+    if unlabelled:
+        warnings.append(
+            f"CellBundle {cell_id}: в timeseries есть циклы, отсутствующие в cycles "
+            f"(вне бенчмарка, ТЗ §5.1): {unlabelled[:5]}"
+            + (f" (всего {len(unlabelled)})" if len(unlabelled) > 5 else "")
         )
     return warnings
 

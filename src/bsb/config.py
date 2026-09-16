@@ -246,6 +246,7 @@ class FragmentConfig:
     seed: int
     windows_per_cycle: int
     delta_v_grid: tuple[float, ...]
+    absolute_bounds: tuple[float, float]
 
 
 @dataclass(frozen=True, slots=True)
@@ -539,6 +540,7 @@ def _parse_fragment(value: Any) -> FragmentConfig:
             "seed",
             "windows_per_cycle",
             "delta_v_grid",
+            "absolute_bounds",
         ),
     )
     delta_v = _as_float(data["delta_v"], "fragment.delta_v")
@@ -571,6 +573,14 @@ def _parse_fragment(value: Any) -> FragmentConfig:
     grid = _as_float_tuple(data["delta_v_grid"], "fragment.delta_v_grid")
     if not grid or any(item <= 0 for item in grid):
         raise ConfigError("fragment.delta_v_grid: ожидался непустой список положительных чисел")
+    absolute = _as_float_tuple(data["absolute_bounds"], "fragment.absolute_bounds")
+    if len(absolute) != 2 or absolute[0] >= absolute[1]:
+        raise ConfigError("fragment.absolute_bounds: ожидалась пара [lo, hi] с lo < hi")
+    if absolute[1] - absolute[0] < delta_v:
+        raise ConfigError(
+            "fragment.absolute_bounds: диапазон уже ширины окна delta_v, "
+            "ни один фрагмент не поместится"
+        )
     return FragmentConfig(
         delta_v=delta_v,
         n_points=n_points,
@@ -581,6 +591,7 @@ def _parse_fragment(value: Any) -> FragmentConfig:
         seed=_as_int(data["seed"], "fragment.seed"),
         windows_per_cycle=_as_int(data["windows_per_cycle"], "fragment.windows_per_cycle"),
         delta_v_grid=grid,
+        absolute_bounds=(absolute[0], absolute[1]),
     )
 
 
