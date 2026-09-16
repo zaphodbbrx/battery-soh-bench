@@ -63,6 +63,11 @@ def build_parser() -> argparse.ArgumentParser:
         "compact", help="собрать унифицированный уровень из parts/"
     )
     compact_parser.add_argument("--datasets", default=None, help="список датасетов через запятую")
+    compact_parser.add_argument(
+        "--allow-partial",
+        action="store_true",
+        help="разрешить запись унифицированного уровня без остальных датасетов",
+    )
 
     ingest_parser = subparsers.add_parser("ingest", help="разобрать сырые данные датасета")
     ingest_parser.add_argument("--dataset", required=True, choices=sorted(ADAPTERS))
@@ -151,7 +156,7 @@ def _cmd_splits_check(config: BenchmarkConfig) -> int:
 def _cmd_compact(config: BenchmarkConfig, args: argparse.Namespace) -> int:
     """Команда ``compact``: собрать унифицированный уровень."""
     datasets = args.datasets.split(",") if args.datasets else None
-    compact(config, datasets=datasets)
+    compact(config, datasets=datasets, allow_partial=bool(getattr(args, "allow_partial", False)))
     cells = list_cells(config)
     print(f"унифицированный уровень собран: {len(cells)} ячеек в {config.paths.unified_dir}")
     return EXIT_OK
@@ -175,9 +180,12 @@ def _cmd_ingest(config: BenchmarkConfig, args: argparse.Namespace) -> int:
             bundle = adapter.mark_reference_cycles(adapter.load_cell(source))
             warnings.extend(f"{source.cell_id}: {item}" for item in validate_bundle(bundle))
             write_bundle(config, bundle, dataset=args.dataset)
-        except (SchemaViolation, ValueError, KeyError) as exc:
+        except Exception as exc:
             # Одна плохая ячейка не должна ронять разбор всего датасета:
             # причина попадает в отчёт, остальные ячейки обрабатываются.
+            # Ловим широко сознательно: сырые наборы дают самые разные ошибки
+            # разбора (битые файлы, чужие форматы), и останавливать из-за них
+            # прогон на 15 ячейках бессмысленно.
             failures.append((source.cell_id, str(exc)))
             print(f"  [{index}/{len(sources)}] {source.cell_id}: ОШИБКА: {exc}", file=sys.stderr)
             continue
@@ -191,7 +199,9 @@ def _cmd_ingest(config: BenchmarkConfig, args: argparse.Namespace) -> int:
     if failures:
         print(f"не разобрано ячеек: {len(failures)} из {len(sources)}", file=sys.stderr)
     if args.compact:
-        return _cmd_compact(config, argparse.Namespace(datasets=args.dataset))
+        # Собираем все разобранные датасеты, а не только текущий: сборка
+        # подмножества перезаписала бы cells.parquet без остальных.
+        return _cmd_compact(config, argparse.Namespace(datasets=None))
     return EXIT_OK
 
 

@@ -109,6 +109,33 @@ def test_read_missing_table_is_reported(
         read_cells(config)
 
 
+def test_compact_refuses_to_drop_other_datasets(
+    make_config: Callable[[dict[str, Any] | None], BenchmarkConfig],
+) -> None:
+    """Сборка подмножества не должна молча терять остальные датасеты.
+
+    Найдено на реальном прогоне: ``bsb ingest --dataset calce --compact``
+    перезаписывал ``cells.parquet`` только CALCE и стирал Oxford.
+    """
+    config = make_config()
+    write_bundle(config, synth_bundle(cell_id="oxford_Cell1"), dataset="oxford")
+    write_bundle(
+        config,
+        synth_bundle(
+            cell_id="calce_CS2_33", dataset="calce", chemistry="LCO", form_factor="prismatic"
+        ),
+        dataset="calce",
+    )
+    with pytest.raises(ValueError, match="выбросила бы"):
+        compact(config, datasets=["calce"])
+    # с явным подтверждением потеря разрешена
+    compact(config, datasets=["calce"], allow_partial=True)
+    assert read_cells(config)["cell_id"].to_list() == ["calce_CS2_33"]
+    # а сборка всех датасетов возвращает оба
+    compact(config)
+    assert read_cells(config).height == 2
+
+
 def test_write_bundle_rejects_multirow_cells(
     make_config: Callable[[dict[str, Any] | None], BenchmarkConfig],
     synthetic_bundle: CellBundle,

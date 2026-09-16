@@ -445,6 +445,9 @@ def validate_timeseries(
     charge_first_tol_ah: float = 1e-6,
     integration_atol_ah: float = 2e-3,
     integration_rtol: float = 5e-3,
+    sign_violation_tol_rel: float = 0.02,
+    rest_violation_tol_rel: float = 0.25,
+    charge_monotonicity_tol_rel: float = 0.01,
     require_nonempty: bool = True,
 ) -> list[str]:
     """Проверить ``timeseries/`` на соблюдение соглашений §4.3.
@@ -453,7 +456,14 @@ def validate_timeseries(
     неубывание внутри цикла, ``charge_ah`` начинается с нуля и монотонна
     внутри шага, знак тока (заряд +, разряд -), rest около нуля.
 
-    Возвращает замечания по точности интегрирования ``charge_ah``.
+    Соглашение о знаке — свойство **шага**, а не каждой отдельной точки:
+    реальные тестеры дают короткие выбросы противоположного знака на
+    переходах (в CALCE встречается -0.18 А внутри зарядного шага). Поэтому
+    проверяется доля нарушителей: медиана обязана иметь правильный знак, а
+    нарушителей допускается не больше ``sign_violation_tol_rel``. Каждый
+    такой случай попадает в замечания.
+
+    Возвращает замечания по точности интегрирования и по выбросам знака.
     """
     check_structure(df, TIMESERIES_SCHEMA, name="timeseries")
     if df.height == 0:
@@ -491,6 +501,9 @@ def validate_timeseries(
                 charge_first_tol_ah=charge_first_tol_ah,
                 integration_atol_ah=integration_atol_ah,
                 integration_rtol=integration_rtol,
+                sign_violation_tol_rel=sign_violation_tol_rel,
+                rest_violation_tol_rel=rest_violation_tol_rel,
+                charge_monotonicity_tol_rel=charge_monotonicity_tol_rel,
             )
         )
     return warnings
@@ -506,6 +519,9 @@ def _validate_cycle_steps(
     charge_first_tol_ah: float,
     integration_atol_ah: float,
     integration_rtol: float,
+    sign_violation_tol_rel: float,
+    rest_violation_tol_rel: float,
+    charge_monotonicity_tol_rel: float,
 ) -> list[str]:
     """Проверить один цикл: монотонность времени, шаги, знак тока, интеграл."""
     cell_id = str(parts["cell_id"][0])
@@ -546,26 +562,74 @@ def _validate_cycle_steps(
         finite = segment_current[~_isnan(segment_current)]
         worst = float(finite.max()) if finite.size else 0.0
         lowest = float(finite.min()) if finite.size else 0.0
-        if kind in {"chg_cc", "chg_cv"} and lowest < -current_sign_tol_a:
-            raise SchemaViolation(
-                f"timeseries: шаг {kind} в {where} содержит ток {lowest:.4f} A <= 0 "
-                "(ток заряда обязан быть положительным, ТЗ §4.3)"
+        if kind in {"chg_cc", "chg_cv"}:
+            wrong = finite < -current_sign_tol_a
+            _check_sign(
+                kind=kind,
+                where=where,
+                wrong=wrong,
+                median=float(np.median(finite)) if finite.size else 0.0,
+                expected="положительным",
+                tolerance=sign_violation_tol_rel,
+                warnings=warnings,
+                worst_text=f"худшее значение {lowest:.4f} A",
             )
-        if kind == "dch" and worst > current_sign_tol_a:
-            raise SchemaViolation(
-                f"timeseries: шаг dch в {where} содержит ток {worst:.4f} A >= 0 "
-                "(ток разряда обязан быть отрицательным, ТЗ §4.3)"
+        if kind == "dch":
+            wrong = finite > current_sign_tol_a
+            _check_sign(
+                kind=kind,
+                where=where,
+                wrong=wrong,
+                median=float(np.median(finite)) if finite.size else 0.0,
+                expected="отрицательным",
+                tolerance=sign_violation_tol_rel,
+                warnings=warnings,
+                worst_text=f"худшее значение {worst:.4f} A",
             )
-        if kind == "rest" and max(abs(worst), abs(lowest)) > rest_current_tol_a:
-            raise SchemaViolation(
-                f"timeseries: шаг rest в {where} содержит ток {max(abs(worst), abs(lowest)):.4f} A "
-                f"(порог {rest_current_tol_a} A)"
+        if kind == "rest":
+            wrong = np.abs(finite) > rest_current_tol_a
+            _check_sign(
+                kind=kind,
+                where=where,
+                wrong=wrong,
+                median=float(np.median(finite)) if finite.size else 0.0,
+                expected="околонулевым",
+                # У rest хвост шага может нести остаточный ток (в CALCE это
+                # последние точки CV на пороге отсечки 0.05 А), поэтому доля
+                # выбросов допускается заметно больше, чем у заряда/разряда.
+                tolerance=rest_violation_tol_rel,
+                warnings=warnings,
+                worst_text=f"худшее значение {max(abs(worst), abs(lowest)):.4f} A",
             )
         deltas = segment_charge[1:] - segment_charge[:-1]
-        if kind in {"chg_cc", "chg_cv"} and (deltas < -charge_first_tol_ah).any():
-            raise SchemaViolation(f"timeseries: charge_ah убывает внутри шага {kind} в {where}")
-        if kind == "dch" and (deltas > charge_first_tol_ah).any():
-            raise SchemaViolation(f"timeseries: charge_ah растёт внутри шага dch в {where}")
+        # Масштаб шага: короткий выброс тока даёт микроскопический провал
+        # charge_ah, и ронять на нём разбор всего датасета бессмысленно.
+        # Значимое нарушение монотонности (больше charge_monotonicity_tol_rel
+        # от накопленного заряда) по-прежнему ошибка.
+        scale_ah = max(float(np.abs(segment_charge).max()), charge_first_tol_ah)
+        monotonicity_tol = max(charge_first_tol_ah, charge_monotonicity_tol_rel * scale_ah)
+        if kind in {"chg_cc", "chg_cv"}:
+            if (deltas < -monotonicity_tol).any():
+                raise SchemaViolation(
+                    f"timeseries: charge_ah убывает внутри шага {kind} в {where} "
+                    f"(провал {abs(deltas.min()):.4f} А·ч при накопленном {scale_ah:.4f} А·ч)"
+                )
+            if (deltas < -charge_first_tol_ah).any():
+                warnings.append(
+                    f"timeseries: charge_ah шага {kind} в {where} слегка немонотонен "
+                    f"(провал {abs(deltas.min()):.6f} А·ч) — выброс тока тестера"
+                )
+        if kind == "dch":
+            if (deltas > monotonicity_tol).any():
+                raise SchemaViolation(
+                    f"timeseries: charge_ah растёт внутри шага dch в {where} "
+                    f"(всплеск {deltas.max():.4f} А·ч при накопленном {abs(scale_ah):.4f} А·ч)"
+                )
+            if (deltas > charge_first_tol_ah).any():
+                warnings.append(
+                    f"timeseries: charge_ah шага dch в {where} слегка немонотонен "
+                    f"(всплеск {deltas.max():.6f} А·ч) — выброс тока тестера"
+                )
         if strict and segment_t.size > 1:
             integrated = _cumulative_charge(segment_t, segment_current)
             scale = max(float(abs(segment_charge).max()), integration_atol_ah)
@@ -576,6 +640,39 @@ def _validate_cycle_steps(
                     f"на {deviation:.4f} A·ч (ТЗ §4.3 требует интегрирование)"
                 )
     return warnings
+
+
+def _check_sign(
+    *,
+    kind: str,
+    where: str,
+    wrong: Any,
+    median: float,
+    expected: str,
+    tolerance: float,
+    warnings: list[str],
+    worst_text: str,
+) -> None:
+    """Проверить знак тока шага как свойство шага, а не отдельной точки.
+
+    Медиана обязана иметь правильный знак; доля точек-нарушителей допускается
+    не больше ``tolerance`` и попадает в замечания (короткие выбросы тестера на
+    переходах — реальность, а не нарушение соглашения §4.3).
+    """
+    if wrong.size == 0:
+        return
+    fraction = float(wrong.mean())
+    if fraction > tolerance:
+        raise SchemaViolation(
+            f"timeseries: шаг {kind} в {where} содержит ток, который обязан быть "
+            f"{expected}: {fraction:.1%} точек нарушают знак ({worst_text}, "
+            f"медиана {median:.4f} A, порог {tolerance:.0%})"
+        )
+    if wrong.any():
+        warnings.append(
+            f"timeseries: в шаге {kind} ({where}) {int(wrong.sum())} из {wrong.size} точек "
+            f"имеют неверный знак ({worst_text}) — считаем выбросом тестера"
+        )
 
 
 def _isnan(values: Any) -> Any:

@@ -91,11 +91,32 @@ def write_bundle(
     return target
 
 
-def compact(config: BenchmarkConfig, *, datasets: Sequence[str] | None = None) -> Path:
+def compact(
+    config: BenchmarkConfig,
+    *,
+    datasets: Sequence[str] | None = None,
+    allow_partial: bool = False,
+) -> Path:
     """Собрать общий унифицированный уровень из ``parts/``.
 
     Один и тот же код обслуживает обучающие датасеты и тест (ТЗ §6.4):
     никаких ветвлений «если тест» здесь нет.
+
+    Parameters
+    ----------
+    datasets
+        Собрать только эти датасеты. По умолчанию — все, что есть в ``parts/``.
+    allow_partial
+        Разрешить запись неполного унифицированного уровня. Без него сборка
+        подмножества при наличии других датасетов падает: иначе ``cells.parquet``
+        молча теряет датасеты, которые не попали в вызов.
+
+    Raises
+    ------
+    FileNotFoundError
+        Если промежуточного слоя нет или запрошен неразобранный датасет.
+    ValueError
+        Если сборка подмножества уничтожила бы данные других датасетов.
     """
     root = parts_dir(config)
     if not root.is_dir():
@@ -107,6 +128,13 @@ def compact(config: BenchmarkConfig, *, datasets: Sequence[str] | None = None) -
         raise FileNotFoundError(f"нет parts для датасетов {unknown}; есть {available}")
     if not selected:
         raise FileNotFoundError(f"{root} пуст: нет ни одного датасета")
+    dropped = sorted(set(available) - set(selected))
+    if dropped and not allow_partial:
+        raise ValueError(
+            f"сборка только {selected} выбросила бы из унифицированного уровня "
+            f"датасеты {dropped}. Соберите все (без --datasets) или подтвердите "
+            "потерю флагом allow_partial."
+        )
 
     cells_parts: list[pl.DataFrame] = []
     cycles_parts: list[pl.DataFrame] = []

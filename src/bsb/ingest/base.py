@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from itertools import pairwise
 from pathlib import Path
 from typing import Any, Final, Protocol, runtime_checkable
 
@@ -45,7 +46,9 @@ __all__ = [
     "RawBundle",
     "build_raw_bundle",
     "cell_id_for",
+    "classify_step",
     "integrate_charge",
+    "split_into_steps",
     "validate_raw_bundle",
 ]
 
@@ -145,6 +148,94 @@ def integrate_charge(t_s: Sequence[float], current_a: Sequence[float]) -> np.nda
     deltas = np.diff(time) / 3600.0
     trapezoids = 0.5 * (current[1:] + current[:-1]) * deltas
     return np.concatenate([[0.0], np.cumsum(trapezoids)])
+
+
+def split_into_steps(
+    t_s: Sequence[float],
+    current_a: Sequence[float],
+    voltage_v: Sequence[float],
+    temperature_c: Sequence[float],
+    *,
+    max_gap_s: float,
+    min_points: int = 2,
+) -> list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
+    """Разбить запись на непрерывные шаги по разрывам времени.
+
+    Разрыв больше ``max_gap_s`` означает перезапуск тестера или склейку двух
+    записей (в Oxford это ``Cell1.cyc3200``). Неположительный шаг времени —
+    тоже граница: в CALCE ``Test_Time(s)`` иногда сбрасывается посреди файла, и
+    без деления такой сброс даёт отрицательный ``dt``, а с ним немонотонный
+    ``charge_ah`` внутри шага.
+    """
+    time = np.asarray(t_s, dtype=float)
+    current = np.asarray(current_a, dtype=float)
+    voltage = np.asarray(voltage_v, dtype=float)
+    temperature = np.asarray(temperature_c, dtype=float)
+    if time.size < min_points:
+        return []
+    deltas = np.diff(time)
+    breaks = np.flatnonzero((deltas > max_gap_s) | (deltas <= 0)) + 1
+    bounds = [0, *breaks.tolist(), time.size]
+    steps = []
+    for start, stop in pairwise(bounds):
+        if stop - start < min_points:
+            continue
+        steps.append(
+            (
+                time[start:stop] - time[start],
+                current[start:stop],
+                voltage[start:stop],
+                temperature[start:stop],
+            )
+        )
+    return steps
+
+
+def classify_step(
+    current_a: np.ndarray,
+    voltage_v: np.ndarray,
+    *,
+    cc_current_tolerance_rel: float,
+    cv_voltage_tolerance_v: float,
+    rest_current_tolerance_a: float,
+    current_sign_tolerance_a: float,
+) -> str:
+    """Определить ``step_type`` шага по §4.4 — единственное общее место.
+
+    Правила ТЗ:
+
+    * ``chg_cc`` — ток > 0 и стабилен в пределах ``cc_current_tolerance_rel``
+      от медианы шага;
+    * ``chg_cv`` — ток > 0, напряжение стабильно в пределах
+      ``cv_voltage_tolerance_v``, ток падает;
+    * ``dch`` — ток отрицательный;
+    * ``rest`` — ток около нуля.
+
+    Пороги приходят из ``step_labeling`` конфига, а не зашиты: на KIT с
+    разрешением 2 с они почти наверняка потребуют правки (§4.4).
+    """
+    current = np.asarray(current_a, dtype=float)
+    voltage = np.asarray(voltage_v, dtype=float)
+    if current.size == 0:
+        return "rest"
+    median_current = float(np.median(current))
+    if abs(median_current) <= rest_current_tolerance_a:
+        return "rest"
+    if median_current < -current_sign_tolerance_a:
+        return "dch"
+    if median_current <= current_sign_tolerance_a:
+        return "rest"
+    span_v = float(np.max(voltage) - np.min(voltage))
+    stable_voltage = span_v <= cv_voltage_tolerance_v
+    reference = abs(median_current) if median_current else 1.0
+    within = np.abs(current - median_current) <= cc_current_tolerance_rel * reference
+    stable_current = bool(within.mean() >= 0.5)
+    current_falls = float(current[-1]) < float(current[0]) * (1.0 - cc_current_tolerance_rel)
+    if stable_voltage and not stable_current:
+        return "chg_cv"
+    if current_falls and stable_voltage:
+        return "chg_cv"
+    return "chg_cc"
 
 
 def build_raw_bundle(

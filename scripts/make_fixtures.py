@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import argparse
+import shutil
 import sys
 from pathlib import Path
 
@@ -35,6 +36,13 @@ CELL_FIELD = "Cell1"
 CYCLE_SUFFIXES = (0, 3200, 8200)
 STEPS = ("C1ch", "C1dc", "OCVch", "OCVdc")
 ARRAYS = ("t", "v", "q", "T")
+
+#: Файлы CALCE копируются в фикстуры как есть: один Arbin (Excel) и один CADEX
+#: (txt). Они уже небольшие, вырезать из них нечего.
+CALCE_FIXTURES = {
+    "CS2_33/CS2_33/CS2_33_10_05_10.xlsx": "calce_CS2_33_arbin.xlsx",
+    "CS2_8/CS2_8/CS2_8_1_28_10.txt": "calce_CS2_8_cadex.txt",
+}
 
 
 def main() -> int:
@@ -70,6 +78,16 @@ def main() -> int:
         print(
             f"  {field}: " + ", ".join(f"{step}={payload[field][step]['t'].size}" for step in STEPS)
         )
+
+    calce_raw = config.paths.raw_dir / "calce"
+    for relative, target_name in CALCE_FIXTURES.items():
+        source = calce_raw / relative
+        if not source.is_file():
+            print(f"  пропуск CALCE-фикстуры: нет {source}", file=sys.stderr)
+            continue
+        target = out_path.parent / target_name
+        shutil.copy2(source, target)
+        print(f"фикстура: {target} ({target.stat().st_size / 1024:.0f} КиБ)")
     return 0
 
 
