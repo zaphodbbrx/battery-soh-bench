@@ -51,6 +51,7 @@ from bsb.ingest.base import (
     CellSource,
     RawBundle,
     build_raw_bundle,
+    charge_throughput_by_cycle,
     classify_step,
     integrate_charge,
     split_into_steps,
@@ -487,16 +488,7 @@ class CalceAdapter:
         if candidates.height == 0:
             return cycles, 0
         bol = float(candidates["capacity_ah"][0])
-        # Перенесённый заряд — сумма максимумов по фазовым типам: charge_ah
-        # внутри фазы считается от её начала (§4.3), поэтому CC и CV надо
-        # складывать, а не брать общий максимум.
-        charge = (
-            bundle.timeseries.filter(pl.col("step_type").is_in(["chg_cc", "chg_cv"]))
-            .group_by(["cycle_index", "step_type"])
-            .agg(pl.col("charge_ah").max().alias("q_phase"))
-            .group_by("cycle_index")
-            .agg(pl.col("q_phase").sum().alias("q_charge"))
-        )
+        charge = charge_throughput_by_cycle(bundle.timeseries)
         joined = cycles.join(charge, on="cycle_index", how="left").with_columns(
             pl.col("q_charge").fill_null(0.0)
         )

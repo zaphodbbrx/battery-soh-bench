@@ -1,0 +1,4 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<title>Redirecting...</title>
+<h1>Redirecting...</h1>
+<p>You should be redirected automatically to target URL: <a href="/login?next=https%3A%2F%2Fdatabase.batteryarchive.org%2Fembed%2Fdashboards%2FdG5C30gXNzH77rMeApZ4lIOrjy0m7pencFScWFA5%3Forg_slug%3Ddefault">/login?next=https%3A%2F%2Fdatabase.batteryarchive.org%2Fembed%2Fdashboards%2FdG5C30gXNzH77rMeApZ4lIOrjy0m7pencFScWFA5%3Forg_slug%3Ddefault</a>.  If not click the link.

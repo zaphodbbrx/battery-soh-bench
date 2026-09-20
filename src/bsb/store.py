@@ -177,6 +177,11 @@ def compact(
         timeseries_files.extend(sorted((root / name / "timeseries").glob("*.parquet")))
 
     config.paths.unified_dir.mkdir(parents=True, exist_ok=True)
+    # Полная сборка начинается с чистого каталога партиций: иначе в нём
+    # остаются файлы ячеек, которые больше не разбираются (исключённые правилом
+    # или исчезнувшие из сырых данных), и list_cells начинает врать.
+    if datasets is None and config.paths.timeseries_dir.is_dir():
+        shutil.rmtree(config.paths.timeseries_dir)
     config.paths.timeseries_dir.mkdir(parents=True, exist_ok=True)
     if cells_parts:
         cells = conform(pl.concat(cells_parts, how="vertical"), CELLS_SCHEMA, name="cells").sort(

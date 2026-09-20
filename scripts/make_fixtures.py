@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import argparse
+import pickle
 import shutil
 import sys
 from pathlib import Path
@@ -43,6 +44,31 @@ CALCE_FIXTURES = {
     "CS2_33/CS2_33/CS2_33_10_05_10.xlsx": "calce_CS2_33_arbin.xlsx",
     "CS2_8/CS2_8/CS2_8_1_28_10.txt": "calce_CS2_8_cadex.txt",
 }
+
+#: Ячейка SNL для фикстуры Sandia и сколько циклов из неё оставить.
+SANDIA_CELL = "SNL_18650_NMC_25C_0-100_0.5-1C_a.pkl"
+SANDIA_CYCLES = 6
+SANDIA_FIXTURE = "sandia_SNL_18650_NMC_25C_0-100_0.5-1C_a_small.pkl"
+
+
+def sandia_window(cycles: list[dict[str, object]], size: int) -> list[dict[str, object]]:
+    """Окно циклов вокруг первого capacity check, а не первые попавшиеся.
+
+    У ячейки 0.5-1C рабочие циклы разряжаются на 1C, а проверки ёмкости — на
+    0.5C, и идут они не с начала файла. Без этого фикстура не содержала бы ни
+    одного опорного цикла и smoke-тест проверял бы не то.
+    """
+    for index, cycle in enumerate(cycles):
+        current = np.asarray(cycle["current_in_A"], dtype=float)
+        charge, discharge = current > 0.05, current < -0.05
+        if not (charge.any() and discharge.any()):
+            continue
+        charge_current = abs(float(np.median(current[charge])))
+        discharge_current = abs(float(np.median(current[discharge])))
+        if charge_current > 0 and abs(discharge_current - charge_current) <= 0.02 * charge_current:
+            start = max(0, index - 2)
+            return cycles[start : start + size]
+    return cycles[:size]
 
 
 def main() -> int:
@@ -78,6 +104,25 @@ def main() -> int:
         print(
             f"  {field}: " + ", ".join(f"{step}={payload[field][step]['t'].size}" for step in STEPS)
         )
+
+    # Фикстура Sandia: метаданные плюс несколько циклов. Полный pickle весит
+    # 18 МБ (тысячи циклов), в репозитории ему не место, а для smoke-теста
+    # достаточно первых циклов — среди них есть capacity check.
+    sandia_source = config.paths.raw_dir / "sandia" / SANDIA_CELL
+    if sandia_source.is_file():
+        with sandia_source.open("rb") as handle:
+            payload = pickle.load(handle)
+        payload = dict(payload)
+        payload["cycle_data"] = sandia_window(payload["cycle_data"], SANDIA_CYCLES)
+        target = out_path.parent / SANDIA_FIXTURE
+        with target.open("wb") as handle:
+            pickle.dump(payload, handle, protocol=pickle.HIGHEST_PROTOCOL)
+        print(
+            f"фикстура: {target} ({target.stat().st_size / 1024:.0f} КиБ, "
+            f"{len(payload['cycle_data'])} циклов)"
+        )
+    else:
+        print(f"  пропуск фикстуры Sandia: нет {sandia_source}", file=sys.stderr)
 
     calce_raw = config.paths.raw_dir / "calce"
     for relative, target_name in CALCE_FIXTURES.items():

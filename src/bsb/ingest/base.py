@@ -46,8 +46,12 @@ __all__ = [
     "RawBundle",
     "build_raw_bundle",
     "cell_id_for",
+    "charge_throughput_by_cycle",
     "classify_step",
     "integrate_charge",
+    "isolated_sign_flips",
+    "plausible_mask",
+    "segment_cycle",
     "split_into_steps",
     "validate_raw_bundle",
 ]
@@ -150,6 +154,82 @@ def integrate_charge(t_s: Sequence[float], current_a: Sequence[float]) -> np.nda
     return np.concatenate([[0.0], np.cumsum(trapezoids)])
 
 
+def charge_throughput_by_cycle(timeseries: pl.DataFrame) -> pl.DataFrame:
+    """Перенесённый заряд каждого цикла, А·ч (сумма фаз заряда).
+
+    ``charge_ah`` внутри фазы считается от её начала (§4.3), поэтому CC и CV
+    надо складывать, а не брать общий максимум. Величина нужна правилу «полный
+    цикл обязан перенести существенный заряд»: в CALCE и SNL встречаются циклы,
+    которые доходят до границ по напряжению, но переносят почти ноль
+    (ячейка уже была полной или запись оборвана), и их ёмкость занижена в разы.
+    """
+    return (
+        timeseries.filter(pl.col("step_type").is_in(["chg_cc", "chg_cv"]))
+        .group_by(["cycle_index", "step_type"])
+        .agg(pl.col("charge_ah").max().alias("q_phase"))
+        .group_by("cycle_index")
+        .agg(pl.col("q_phase").sum().alias("q_charge"))
+    )
+
+
+def plausible_mask(
+    t_s: Sequence[float],
+    current_a: Sequence[float],
+    voltage_v: Sequence[float],
+    temperature_c: Sequence[float],
+) -> np.ndarray:
+    """Маска точек с физически осмысленными значениями (ТЗ §4.3).
+
+    В сырых логах встречаются сенсорные сбои: в SNL это 5 точек из 11.6 млн с
+    напряжением ``-0.005 В`` и ровно ``0 В``. §4.3 запрещает тащить суррогаты
+    (нули и минус единицы вместо пропусков), а схема требует напряжение > 0,
+    поэтому такие точки отбрасываются, а их число попадает в ``notes``.
+    """
+    from bsb.schema import PLAUSIBLE_BOUNDS
+
+    time = np.asarray(t_s, dtype=float)
+    current = np.asarray(current_a, dtype=float)
+    voltage = np.asarray(voltage_v, dtype=float)
+    temperature = np.asarray(temperature_c, dtype=float)
+    low_v, high_v = PLAUSIBLE_BOUNDS["voltage_v"]
+    low_i, high_i = PLAUSIBLE_BOUNDS["current_a"]
+    low_t, high_t = PLAUSIBLE_BOUNDS["temperature_c"]
+    finite = np.isfinite(time) & np.isfinite(current) & np.isfinite(voltage)
+    # Температура в §4.3 nullable: у части ячеек SNL она не пишется вовсе
+    # (весь цикл NaN). Пропуск должен становиться null, а не выбрасывать точки,
+    # поэтому NaN здесь допустим, а отсекаются только выходы за границы.
+    temperature_ok = ~np.isfinite(temperature) | ((temperature >= low_t) & (temperature <= high_t))
+    return (
+        finite
+        & (time >= 0.0)
+        & (voltage > low_v)
+        & (voltage <= high_v)
+        & (current >= low_i)
+        & (current <= high_i)
+        & temperature_ok
+    )
+
+
+def isolated_sign_flips(current_a: Sequence[float], *, tolerance: float) -> np.ndarray:
+    """Маска одиночных отсчётов, знак которых противоречит обоим соседям.
+
+    В SNL встречается точка ``-1.101 А`` посреди заряда на ``+1.499 А``: знак
+    противоположен и предыдущему, и следующему отсчёту. Это сбой датчика, а не
+    смена фазы: если такую точку оставить, она либо разрежет одну CC-фазу на
+    две, либо даст ложное нарушение знака в §4.3.
+    """
+    current = np.asarray(current_a, dtype=float)
+    if current.size < 3:
+        return np.zeros(current.size, dtype=bool)
+    sign = np.where(current > tolerance, 1, np.where(current < -tolerance, -1, 0))
+    middle = sign[1:-1]
+    flips = np.zeros(current.size, dtype=bool)
+    flips[1:-1] = (
+        (middle != 0) & (middle != sign[:-2]) & (middle != sign[2:]) & (sign[:-2] == sign[2:])
+    )
+    return flips
+
+
 def split_into_steps(
     t_s: Sequence[float],
     current_a: Sequence[float],
@@ -187,6 +267,121 @@ def split_into_steps(
                 voltage[start:stop],
                 temperature[start:stop],
             )
+        )
+    return steps
+
+
+def segment_cycle(
+    t_s: Sequence[float],
+    current_a: Sequence[float],
+    voltage_v: Sequence[float],
+    temperature_c: Sequence[float],
+    *,
+    rest_current_tolerance_a: float,
+    current_sign_tolerance_a: float,
+    cv_voltage_tolerance_v: float,
+    min_run: int = 3,
+) -> list[tuple[str, np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
+    """Разбить цикл на шаги по данным, когда исходник не даёт номеров шагов.
+
+    Часть датасетов (BatteryLife/SNL) отдаёт внутрицикловые ряды без
+    ``Step_Index``, поэтому границы шагов восстанавливаются по физике:
+
+    1. точки делятся на режимы — отдых (``|i| <= rest_tol``), заряд, разряд;
+    2. короткие пробеги (одиночные выбросы) приклеиваются к соседям;
+    3. внутри заряда фаза CV отделяется по правилу §4.4: CV начинается там, где
+       напряжение впервые поднялось в пределы ``cv_voltage_tolerance_v`` от
+       максимума заряда, то есть дальше напряжение стоит, а ток падает.
+
+    Возвращает список ``(step_type, t_s, current_a, voltage_v, temperature_c)``
+    с временем от начала **шага**.
+    """
+    time = np.asarray(t_s, dtype=float)
+    current = np.asarray(current_a, dtype=float)
+    voltage = np.asarray(voltage_v, dtype=float)
+    temperature = np.asarray(temperature_c, dtype=float)
+    if time.size < 2:
+        return []
+
+    regime = np.where(
+        current > current_sign_tolerance_a,
+        1,
+        np.where(current < -current_sign_tolerance_a, -1, 0),
+    )
+    bounds = [0, *(np.flatnonzero(np.diff(regime) != 0) + 1).tolist(), time.size]
+    # Отдых — самостоятельный режим: если приклеивать нулевой ток к предыдущему,
+    # то отдых после заряда «съедается» зарядом, и в chg_cc попадают точки с
+    # нулевым током. Сливаются только короткие пробеги (сбои записи).
+    runs: list[list[int]] = []
+    for start, stop in pairwise(bounds):
+        kind = int(regime[start])
+        if stop - start >= min_run:
+            runs.append([kind, start, stop])
+            continue
+        # Короткий пробег. Отдых безопасно приклеить к соседу: нулевой ток не
+        # нарушает ни знак фазы, ни монотонность charge_ah. А вот короткий
+        # всплеск противоположного знака приклеивать нельзя — в зарядную фазу
+        # попадёт отрицательный ток (на реальных данных SNL так падало 15 ячеек).
+        # Такой всплеск — сбой датчика, его точки выпадают из разметки.
+        # Склейка допускается только при непрерывности (runs[-1][2] == start):
+        # иначе диапазон фазы накроет уже выброшенный сбойный отсчёт, который
+        # лежит между ними — так в chg_cv попадал ток -1.313 А.
+        if kind == 0 and runs and runs[-1][2] == start:
+            runs[-1][2] = stop
+    while len(runs) > 1 and runs[0][2] - runs[0][1] < min_run:
+        # Тот же принцип для ведущего короткого пробега: отдых можно отдать
+        # следующей фазе, а всплеск знака — нет, иначе он попадёт в неё.
+        if runs[0][0] == 0:
+            runs[1][1] = runs[0][1]
+        runs.pop(0)
+    if not runs:
+        return []
+
+    pieces: list[tuple[str, int, int]] = []
+    for kind_value, start, stop in runs:
+        kind = kind_value
+        if kind < 0:
+            pieces.append(("dch", start, stop))
+            continue
+        if kind == 0:
+            pieces.append(("rest", start, stop))
+            continue
+        # заряд: отделяем CV по напряжению (§4.4)
+        segment_v = voltage[start:stop]
+        plateau = float(np.max(segment_v)) - cv_voltage_tolerance_v
+        plateau_hits = np.flatnonzero(segment_v >= plateau)
+        if plateau_hits.size == 0 or plateau_hits[0] == 0:
+            pieces.append(("chg_cv" if plateau_hits.size else "chg_cc", start, stop))
+            continue
+        split = start + int(plateau_hits[0])
+        if split <= start or split >= stop:
+            # Вырожденное деление: весь участок либо CC, либо CV. Пустой кусок
+            # нельзя оставлять в списке — он разорвал бы склейку соседей.
+            pieces.append(("chg_cv" if split <= start else "chg_cc", start, stop))
+        else:
+            pieces.append(("chg_cc", start, split))
+            pieces.append(("chg_cv", split, stop))
+
+    # Соседние однотипные фазы склеиваются: короткий провал записи режет одну
+    # CC-фазу на две, и тогда charge_ah сбрасывался бы в её середине, а
+    # валидатор §4.3 видел бы «заряд убывает». Слишком короткие куски при этом
+    # надо отбросить ДО склейки, иначе они разделяют однотипных соседей.
+    merged: list[tuple[str, int, int]] = []
+    for kind, start, stop in pieces:
+        if stop - start < min_run:
+            continue
+        if merged and merged[-1][0] == kind:
+            merged[-1] = (kind, merged[-1][1], stop)
+        else:
+            merged.append((kind, start, stop))
+
+    steps: list[tuple[str, np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = []
+    for kind, start, stop in merged:
+        if stop - start < 2:
+            continue
+        t_local = time[start:stop] - time[start]
+        steps.append(
+            (kind, t_local, current[start:stop], voltage[start:stop], temperature[start:stop])
         )
     return steps
 
