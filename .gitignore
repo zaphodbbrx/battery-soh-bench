@@ -25,3 +25,4 @@ htmlcov/
 
 # --- артефакты прогонов ---
 results.json
+noise_floor.json

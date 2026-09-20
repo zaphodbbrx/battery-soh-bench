@@ -12,19 +12,29 @@ import argparse
 import sys
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 import polars as pl
 
 from bsb import __version__
+from bsb.baseline import MODEL_NAMES, fit_predict, noise_floor, oracle_constant_mae
 from bsb.config import BenchmarkConfig, ConfigError, load_config
 from bsb.dataset import iter_bundles, read_split_cell_ids
-from bsb.eval import render_report, run_eval, save_results
+from bsb.eval import evaluate, load_truth, render_report, run_eval, save_results
 from bsb.fragments import generate_fragments, strip_labels
 from bsb.ingest import ADAPTERS, get_adapter
 from bsb.labels import NoReferenceCycles
 from bsb.schema import SchemaViolation, validate_bundle, validate_fragments
 from bsb.splits import CellLeakageError, assert_no_cell_leakage, load_splits, split_path
-from bsb.store import clear_dataset_parts, compact, list_cells, parts_dir, write_bundle
+from bsb.store import (
+    clear_dataset_parts,
+    compact,
+    list_cells,
+    parts_dir,
+    read_cells,
+    read_cycles,
+    write_bundle,
+)
 from bsb.validate_submission import (
     expected_test_ids,
     read_submission,
@@ -38,10 +48,9 @@ EXIT_FAILURE = 1
 EXIT_NOT_IMPLEMENTED = 3
 
 #: Команда → фаза плана §15, в которой она реализуется.
+#: Команды, ещё не реализованные, с фазой плана §15.
 _PENDING: dict[str, str] = {
     "labels": "фаза 2",
-    "noise-floor": "фаза 8",
-    "baseline": "фаза 8",
 }
 
 
@@ -92,11 +101,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     baseline_parser = subparsers.add_parser("baseline", help="посчитать бейзлайн")
-    baseline_parser.add_argument(
-        "--model", default="elastic_net", choices=("constant", "probe", "elastic_net")
-    )
+    baseline_parser.add_argument("--model", default="elastic_net", choices=MODEL_NAMES)
+    baseline_parser.add_argument("--out", type=Path, default=None, help="куда писать results.json")
 
-    subparsers.add_parser("noise-floor", help="оценить шумовой пол по репликам ячеек")
+    noise_parser = subparsers.add_parser(
+        "noise-floor", help="оценить шумовой пол по репликам ячеек"
+    )
+    noise_parser.add_argument("--out", type=Path, default=None, help="куда писать JSON")
 
     eval_parser = subparsers.add_parser("eval", help="посчитать метрики сабмита")
     eval_parser.add_argument("--submission", type=Path, required=True)
@@ -330,6 +341,127 @@ def _cmd_eval(config: BenchmarkConfig, args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _fragment_metadata(config: BenchmarkConfig, fragments: pl.DataFrame) -> pl.DataFrame:
+    """Метаданные ячейки для каждого фрагмента (нужны пробе §12.3).
+
+    ``chemistry`` добавлена ради контроля ``chem_constant``: это единственное
+    поле, которое участнику не выдаётся, поэтому модель с ней — не сабмит, а
+    эталон для проверки на утечку.
+    """
+    cells = read_cells(config).select(
+        "cell_id", "chemistry", "nominal_capacity_ah", "temperature_setpoint_c"
+    )
+    return (
+        fragments.select("fragment_id", "cell_id")
+        .join(cells, on="cell_id", how="left")
+        .select("fragment_id", "chemistry", "nominal_capacity_ah", "temperature_setpoint_c")
+    )
+
+
+def _cmd_baseline(config: BenchmarkConfig, args: argparse.Namespace) -> int:
+    """Команда ``baseline``: обучить модель и посчитать метрики (§12.5).
+
+    Считаются обе номинации §9: основная (NCA + NMC) и бонусная (LFP) — по
+    решению владельца это и есть два сравнения на SNL.
+
+    Рядом с запрошенной моделью всегда считаются две тривиальные константы —
+    ``constant`` (глобальное среднее обучения) и ``chem_constant`` (среднее по
+    химии) — и печатается вердикт §12.3. Без второй константы проверка на
+    утечку бессмысленна: тест смешивает химии, и «пол» проигрывает не из-за
+    утечки позиции окна, а из-за межхимического сдвига SOH.
+    """
+    train = pl.read_parquet(config.paths.fragments_path("train", labeled=True))
+    test = pl.read_parquet(config.paths.fragments_path("test", labeled=True))
+    metadata = _fragment_metadata(config, pl.concat([train, test], how="vertical"))
+    truth = load_truth(config)
+
+    models = [args.model, *(m for m in ("constant", "chem_constant") if m != args.model)]
+    submissions = {
+        model: fit_predict(train, test, model=model, config=config, metadata=metadata)
+        for model in models
+    }
+    by_mode = {
+        model: {
+            mode: evaluate(sub, truth, config=config, hard_mode=hard)
+            for mode, hard in (("main", False), ("hard", True))
+        }
+        for model, sub in submissions.items()
+    }
+
+    result: dict[str, object] = {"model": args.model, "references": {}}
+    for mode, hard in (("main", False), ("hard", True)):
+        metrics = by_mode[args.model][mode]
+        result[mode] = metrics
+        for model in models:
+            if model != args.model:
+                result["references"].setdefault(model, {})[mode] = by_mode[model][mode]
+        chemistries = (
+            config.eval.hard_mode_chemistries if hard else config.eval.main_test_chemistries
+        )
+        oracle = oracle_constant_mae(truth, chemistries)
+        result["references"].setdefault("constant_test_domain", {})[mode] = round(oracle, 4)
+        print(f"--- {mode} ({', '.join(metrics['chemistries'])})")
+        print(render_report(metrics))
+        print(_render_reference_block(by_mode, args.model, mode, chemistries, oracle))
+        print()
+
+    save_results(result, args.out or config.paths.results_path)
+    print(f"results.json: {args.out or config.paths.results_path}")
+    return EXIT_OK
+
+
+def _render_reference_block(
+    by_mode: dict[str, dict[str, dict[str, Any]]],
+    model: str,
+    mode: str,
+    chemistries: Sequence[str],
+    oracle_mae: float,
+) -> str:
+    """Сравнить модель с тривиальными константами и вынести вердикт §12.3.
+
+    Нулём для пробы служит не среднее обучения, а константа тест-домена:
+    обучение (Barkholtz, почти свежие ячейки) смещено относительно SNL, и проба
+    обходит «пол» за счёт компенсации этого сдвига, а не за счёт положения окна.
+    """
+    rows = {name: by_mode[name][mode]["overall"]["mae_pp"] for name in by_mode}
+    best_trivial = min(rows["constant"], rows["chem_constant"])
+    lines = [
+        "опорные константы (MAE, п.п.):",
+        f"  constant (среднее обучения)     {rows['constant']:8.3f}",
+        f"  chem_constant (среднее химии)   {rows['chem_constant']:8.3f}",
+        f"  constant тест-домена [{', '.join(chemistries)}] {oracle_mae:6.3f}  ← ноль §12.3",
+        f"  модель {model}: {rows[model]:.3f} — "
+        + ("лучше" if rows[model] < best_trivial else "НЕ лучше")
+        + " лучшей константы обучения"
+        + (f" на {best_trivial - rows[model]:+.3f} п.п." if rows[model] < best_trivial else ""),
+    ]
+    if model == "probe":
+        limit = oracle_mae / 1.15
+        verdict = "пройдена" if rows["probe"] >= limit else "ПРОВАЛЕНА"
+        lines.append(
+            f"  утечка §12.3: проба {rows['probe']:.3f} против порога "
+            f"{oracle_mae:.3f}/1.15 = {limit:.3f} — проверка {verdict}"
+        )
+    return "\n".join(lines)
+
+
+def _cmd_noise_floor(config: BenchmarkConfig, args: argparse.Namespace) -> int:
+    """Команда ``noise-floor``: оценить потолок по репликам (§12.4)."""
+    cycles = read_cycles(config)
+    cells = read_cells(config)
+    result = noise_floor(cycles, cells, config)
+    print(f"условий с репликами: {result['conditions']}, ячеек в них: {result['replicates']}")
+    if result["noise_floor_pp"] is None:
+        print(f"шумовой пол не посчитан: {result.get('note')}")
+    else:
+        print(f"шумовой пол: {result['noise_floor_pp']} п.п. (медиана разброса между ячейками)")
+        print("самые шумные условия:")
+        for item in result["per_condition"][:5]:
+            print(f"   {item}")
+    save_results(result, args.out or config.paths.results_path.with_name("noise_floor.json"))
+    return EXIT_OK
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Точка входа ``bsb``. Возвращает код выхода процесса."""
     parser = build_parser()
@@ -352,6 +484,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             "fragments": lambda cfg: _cmd_fragments(cfg, args),
             "validate": lambda cfg: _cmd_validate(cfg, args),
             "eval": lambda cfg: _cmd_eval(cfg, args),
+            "baseline": lambda cfg: _cmd_baseline(cfg, args),
+            "noise_floor": lambda cfg: _cmd_noise_floor(cfg, args),
         }[command]
         return handler(config)
     except (ConfigError, FileNotFoundError, SchemaViolation, CellLeakageError, KeyError) as exc:

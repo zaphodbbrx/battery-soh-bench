@@ -37,6 +37,7 @@ __all__ = [
     "PathsConfig",
     "SplitsConfig",
     "StepLabelingConfig",
+    "ValRuleConfig",
     "load_config",
 ]
 
@@ -191,6 +192,7 @@ class SplitsConfig:
     train_datasets: tuple[str, ...]
     val_datasets: tuple[str, ...]
     test_datasets: tuple[str, ...]
+    val_rule: ValRuleConfig
 
     @property
     def split_names(self) -> tuple[str, ...]:
@@ -202,6 +204,24 @@ class SplitsConfig:
         if split not in self.files:
             raise ConfigError(f"splits: неизвестный сплит {split!r}; есть {sorted(self.files)}")
         return self.files[split]
+
+
+@dataclass(frozen=True, slots=True)
+class ValRuleConfig:
+    """Правило отбора ячеек в val (ТЗ §8).
+
+    Списки задают целые ячейки и целые условия: валидация должна показывать
+    перенос, поэтому в неё не попадает ничего, что встречается в train.
+    """
+
+    calce_cells: tuple[str, ...]
+    oxford_cells: tuple[str, ...]
+    sandia_rd_cells: tuple[str, ...]
+
+    @property
+    def all_cells(self) -> tuple[str, ...]:
+        """Явно перечисленные ячейки из обоих наборов."""
+        return (*self.calce_cells, *self.oxford_cells)
 
 
 @dataclass(frozen=True, slots=True)
@@ -247,6 +267,7 @@ class FragmentConfig:
     windows_per_cycle: int
     delta_v_grid: tuple[float, ...]
     absolute_bounds: tuple[float, float]
+    temperature_fill: Literal["setpoint", "drop"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -429,13 +450,26 @@ def _parse_splits(value: Any) -> SplitsConfig:
     _check_keys(
         data,
         "splits",
-        required=("unit", "files", "train_datasets", "val_datasets", "test_datasets"),
+        required=(
+            "unit",
+            "files",
+            "train_datasets",
+            "val_datasets",
+            "test_datasets",
+            "val_rule",
+        ),
     )
     unit = _as_str(data["unit"], "splits.unit")
     if unit not in SPLIT_UNITS:
         raise ConfigError(f"splits.unit: ожидалось одно из {SPLIT_UNITS}, получено {unit!r}")
     files = _mapping(data["files"], "splits.files")
     _check_keys(files, "splits.files", required=("train", "val", "test"))
+    rule = _mapping(data["val_rule"], "splits.val_rule")
+    _check_keys(
+        rule,
+        "splits.val_rule",
+        required=("calce_cells", "oxford_cells", "sandia_rd_cells"),
+    )
     return SplitsConfig(
         unit=unit,  # type: ignore[arg-type]
         files={
@@ -444,6 +478,13 @@ def _parse_splits(value: Any) -> SplitsConfig:
         train_datasets=_as_str_tuple(data["train_datasets"], "splits.train_datasets"),
         val_datasets=_as_str_tuple(data["val_datasets"], "splits.val_datasets"),
         test_datasets=_as_str_tuple(data["test_datasets"], "splits.test_datasets"),
+        val_rule=ValRuleConfig(
+            calce_cells=_as_str_tuple(rule["calce_cells"], "splits.val_rule.calce_cells"),
+            oxford_cells=_as_str_tuple(rule["oxford_cells"], "splits.val_rule.oxford_cells"),
+            sandia_rd_cells=_as_str_tuple(
+                rule["sandia_rd_cells"], "splits.val_rule.sandia_rd_cells"
+            ),
+        ),
     )
 
 
@@ -541,6 +582,7 @@ def _parse_fragment(value: Any) -> FragmentConfig:
             "windows_per_cycle",
             "delta_v_grid",
             "absolute_bounds",
+            "temperature_fill",
         ),
     )
     delta_v = _as_float(data["delta_v"], "fragment.delta_v")
@@ -573,6 +615,12 @@ def _parse_fragment(value: Any) -> FragmentConfig:
     grid = _as_float_tuple(data["delta_v_grid"], "fragment.delta_v_grid")
     if not grid or any(item <= 0 for item in grid):
         raise ConfigError("fragment.delta_v_grid: ожидался непустой список положительных чисел")
+    temperature_fill = _as_str(data["temperature_fill"], "fragment.temperature_fill")
+    if temperature_fill not in ("setpoint", "drop"):
+        raise ConfigError(
+            "fragment.temperature_fill: ожидалось 'setpoint' или 'drop', "
+            f"получено {temperature_fill!r}"
+        )
     absolute = _as_float_tuple(data["absolute_bounds"], "fragment.absolute_bounds")
     if len(absolute) != 2 or absolute[0] >= absolute[1]:
         raise ConfigError("fragment.absolute_bounds: ожидалась пара [lo, hi] с lo < hi")
@@ -592,6 +640,7 @@ def _parse_fragment(value: Any) -> FragmentConfig:
         windows_per_cycle=_as_int(data["windows_per_cycle"], "fragment.windows_per_cycle"),
         delta_v_grid=grid,
         absolute_bounds=(absolute[0], absolute[1]),
+        temperature_fill=temperature_fill,  # type: ignore[arg-type]
     )
 
 

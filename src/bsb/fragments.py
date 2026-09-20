@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
+from typing import Final
 
 import numpy as np
 import polars as pl
@@ -100,8 +101,22 @@ def _rng(seed: int, cell_id: str, cycle_index: int, window: int) -> np.random.Ge
     return np.random.default_rng(int.from_bytes(_digest(seed, cell_id, cycle_index, window), "big"))
 
 
+#: Колонки, без которых фрагмент не построить (все каналы §7).
+_PHASE_COLUMNS: Final[tuple[str, ...]] = (
+    "voltage_v",
+    "charge_ah",
+    "current_a",
+    "temperature_c",
+)
+
+
 def _cc_phase(timeseries: pl.DataFrame, cycle_index: int, phase: str) -> pl.DataFrame:
     """CC-фаза заряда указанного цикла, отсортированная по напряжению.
+
+    Строки с пропусками выбрасываются: в SNL у 12 ячеек (161 опорный цикл из
+    7154) температура не записана вовсе, и интерполировать по NaN нельзя.
+    Подставлять уставку вместо измерения мы не стали — такой цикл просто не
+    даёт фрагментов.
 
     Дубликаты напряжения ломают ``np.interp``, поэтому для каждого уровня
     остаётся первое вхождение.
@@ -111,6 +126,14 @@ def _cc_phase(timeseries: pl.DataFrame, cycle_index: int, phase: str) -> pl.Data
     )
     if phase_rows.height == 0:
         return phase_rows
+    # NaN, а не только null: numpy превращает пропуски в NaN, и drop_nulls их не
+    # ловит. Для temperature_fill=setpoint такие строки уже заполнены выше.
+    complete = pl.all_horizontal(
+        [pl.col(column).is_not_null() & pl.col(column).is_finite() for column in _PHASE_COLUMNS]
+    )
+    phase_rows = phase_rows.filter(complete)
+    if phase_rows.height < 2:
+        return phase_rows.head(0)
     phase_rows = phase_rows.sort("voltage_v").with_columns(
         pl.col("voltage_v").is_first_distinct().alias("_first")
     )
@@ -120,10 +143,20 @@ def _cc_phase(timeseries: pl.DataFrame, cycle_index: int, phase: str) -> pl.Data
 def _plan(bundle: CellBundle, config: BenchmarkConfig) -> _PhasePlan:
     """Собрать CC-фазы размеченных циклов и допустимые границы окон."""
     fragment = config.fragment
+    timeseries = bundle.timeseries
+    if fragment.temperature_fill == "setpoint":
+        # Канал температуры обязателен по §7, но в CALCE его нет вовсе, а в SNL
+        # он не записан у 161 опорного цикла. Уставка камеры — известное условие
+        # испытания, поэтому подставляем её явно и документируем; при
+        # temperature_fill=drop такие циклы просто не дают фрагментов.
+        setpoint = float(bundle.cell["temperature_setpoint_c"])
+        timeseries = timeseries.with_columns(
+            pl.col("temperature_c").fill_null(setpoint).fill_nan(setpoint).alias("temperature_c")
+        )
     labelled = bundle.cycles
     phases: dict[int, pl.DataFrame] = {}
     for row in labelled["cycle_index"].to_list():
-        phase = _cc_phase(bundle.timeseries, int(row), fragment.phase)
+        phase = _cc_phase(timeseries, int(row), fragment.phase)
         if phase.height > 1:
             phases[int(row)] = phase
     if not phases:
