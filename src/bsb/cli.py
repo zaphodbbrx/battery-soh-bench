@@ -21,6 +21,7 @@ from bsb.dataset import iter_bundles, read_split_cell_ids
 from bsb.eval import render_report, run_eval, save_results
 from bsb.fragments import generate_fragments, strip_labels
 from bsb.ingest import ADAPTERS, get_adapter
+from bsb.labels import NoReferenceCycles
 from bsb.schema import SchemaViolation, validate_bundle, validate_fragments
 from bsb.splits import CellLeakageError, assert_no_cell_leakage, load_splits, split_path
 from bsb.store import clear_dataset_parts, compact, list_cells, parts_dir, write_bundle
@@ -181,11 +182,19 @@ def _cmd_ingest(config: BenchmarkConfig, args: argparse.Namespace) -> int:
     print(f"{args.dataset}: найдено {len(sources)} ячеек в {raw_dir}")
     warnings: list[str] = []
     failures: list[tuple[str, str]] = []
+    skipped: list[tuple[str, str]] = []
     for index, source in enumerate(sources, start=1):
         try:
             bundle = adapter.mark_reference_cycles(adapter.load_cell(source))
             warnings.extend(f"{source.cell_id}: {item}" for item in validate_bundle(bundle))
             write_bundle(config, bundle, dataset=args.dataset)
+        except NoReferenceCycles as exc:
+            # Запись без опорных циклов — не сбой разбора, а свойство данных:
+            # она просто не даёт фрагментов (в архиве Sandia так устроены файлы
+            # 45 °C — мелкие частичные циклы). Отчитываемся отдельно, чтобы
+            # «не разобрано ячеек» не смешивало это с настоящими ошибками.
+            skipped.append((source.cell_id, str(exc)))
+            continue
         except Exception as exc:
             # Одна плохая ячейка не должна ронять разбор всего датасета:
             # причина попадает в отчёт, остальные ячейки обрабатываются.
@@ -202,6 +211,12 @@ def _cmd_ingest(config: BenchmarkConfig, args: argparse.Namespace) -> int:
     for warning in warnings:
         print(f"предупреждение: {warning}", file=sys.stderr)
     print(f"записано в {parts_dir(config, args.dataset)}")
+    if skipped:
+        print(
+            f"пропущено записей без опорных циклов: {len(skipped)} "
+            f"(например, только частичные циклы), первые: {[item[0] for item in skipped[:3]]}",
+            file=sys.stderr,
+        )
     if failures:
         print(f"не разобрано ячеек: {len(failures)} из {len(sources)}", file=sys.stderr)
     if args.compact:

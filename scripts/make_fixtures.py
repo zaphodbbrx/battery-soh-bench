@@ -40,6 +40,13 @@ ARRAYS = ("t", "v", "q", "T")
 
 #: Файлы CALCE копируются в фикстуры как есть: один Arbin (Excel) и один CADEX
 #: (txt). Они уже небольшие, вырезать из них нечего.
+#: Файл архива Sandia R&D для фикстуры. Выбран самый маленький файл, который
+#: даёт больше одного опорного цикла: файлы 45 °C содержат только частичные
+#: циклы и адаптер их обоснованно пропускает, поэтому «просто самый маленький»
+#: не годится.
+SANDIA_RD_SOURCE = "Sandia Cell Cycle Testing Data/NMC_1_5C-15C/NMC_1_15C_Mod.xls"
+SANDIA_RD_FIXTURE = "sandia_rd_NMC_sample.xls"
+
 CALCE_FIXTURES = {
     "CS2_33/CS2_33/CS2_33_10_05_10.xlsx": "calce_CS2_33_arbin.xlsx",
     "CS2_8/CS2_8/CS2_8_1_28_10.txt": "calce_CS2_8_cadex.txt",
@@ -123,6 +130,14 @@ def main() -> int:
         )
     else:
         print(f"  пропуск фикстуры Sandia: нет {sandia_source}", file=sys.stderr)
+
+    rd_source = config.paths.raw_dir / "sandia_rd" / SANDIA_RD_SOURCE
+    if rd_source.is_file():
+        target = out_path.parent / SANDIA_RD_FIXTURE
+        shutil.copy2(rd_source, target)
+        print(f"фикстура: {target} ({target.stat().st_size / 1024:.0f} КиБ, из {rd_source.name})")
+    else:
+        print(f"  пропуск фикстуры Sandia R&D: нет {rd_source}", file=sys.stderr)
 
     calce_raw = config.paths.raw_dir / "calce"
     for relative, target_name in CALCE_FIXTURES.items():

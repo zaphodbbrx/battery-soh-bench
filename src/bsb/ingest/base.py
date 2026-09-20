@@ -19,7 +19,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+import os
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from itertools import pairwise
 from pathlib import Path
@@ -53,6 +55,7 @@ __all__ = [
     "plausible_mask",
     "segment_cycle",
     "split_into_steps",
+    "suppress_native_stderr",
     "validate_raw_bundle",
 ]
 
@@ -170,6 +173,26 @@ def charge_throughput_by_cycle(timeseries: pl.DataFrame) -> pl.DataFrame:
         .group_by("cycle_index")
         .agg(pl.col("q_phase").sum().alias("q_charge"))
     )
+
+
+@contextmanager
+def suppress_native_stderr() -> Iterator[None]:
+    """Заглушить stderr на время вызова нативной библиотеки.
+
+    calamine (через fastexcel) пишет в stderr сообщения вида
+    ``'chartsheet' not a valid worksheet`` для каждого файла, где есть лист
+    диаграммы. В архиве Sandia таких файлов сотни, и шум перекрывает отчёт о
+    разборе. Python-обёртка ``redirect_stderr`` на Rust не действует, поэтому
+    перенаправляем файловый дескриптор.
+    """
+    saved = os.dup(2)
+    try:
+        with open(os.devnull, "w", encoding="utf-8") as devnull:
+            os.dup2(devnull.fileno(), 2)
+            yield
+    finally:
+        os.dup2(saved, 2)
+        os.close(saved)
 
 
 def plausible_mask(

@@ -101,8 +101,9 @@ def test_arbin_ignores_summary_sheets(repo_config: BenchmarkConfig) -> None:
     # split_into_steps, отсчитывая время от начала шага (§4.3).
     assert frame["t_s"].is_sorted()
     assert frame["t_s"].min() > 0.0
-    steps = adapter._steps_of(frame, max_gap_s=600.0)
+    steps, dropped = adapter._steps_of(frame, max_gap_s=600.0)
     assert steps
+    assert dropped >= 0, "пустые строки листа должны отбрасываться"
     for step in steps:
         assert step["t_s"][0] == pytest.approx(0.0, abs=1e-6)
         assert step["t_s"].is_sorted()

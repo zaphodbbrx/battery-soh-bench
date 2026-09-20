@@ -65,13 +65,17 @@ __all__ = [
 
 #: Порядок категорий фиксирован: ``polars.Enum`` разных кадров склеивается
 #: только при совпадении категорий, и это ровно то поведение, которое нужно.
-DATASETS: Final[tuple[str, ...]] = ("calce", "kit", "oxford", "sandia")
+#: ``sandia`` — исследование SNL/Preger (скрытый тест, ТЗ §17.4);
+#: ``sandia_rd`` — архив R&D Repository Sandia (Barkholtz et al. 2017), он идёт
+#: только в обучение и назван отдельно, чтобы сплиты §8 не смешивали два
+#: исследования.
+DATASETS: Final[tuple[str, ...]] = ("calce", "kit", "oxford", "sandia", "sandia_rd")
 CHEMISTRIES: Final[tuple[str, ...]] = ("LCO", "LFP", "NCA", "NMC", "NMC_SiO")
 FORM_FACTORS: Final[tuple[str, ...]] = ("cylindrical_18650", "prismatic", "pouch")
 SOURCES: Final[tuple[str, ...]] = ("measured", "interpolated")
 STEP_TYPES: Final[tuple[str, ...]] = ("chg_cc", "chg_cv", "dch", "rest")
 
-Dataset = Literal["calce", "kit", "oxford", "sandia"]
+Dataset = Literal["calce", "kit", "oxford", "sandia", "sandia_rd"]
 Chemistry = Literal["LCO", "LFP", "NCA", "NMC", "NMC_SiO"]
 FormFactor = Literal["cylindrical_18650", "prismatic", "pouch"]
 SohSource = Literal["measured", "interpolated"]
@@ -318,8 +322,10 @@ def validate_cells(df: pl.DataFrame, *, strict: bool = True) -> list[str]:
     null_id = df["cell_id"].is_null()
     if null_id.any():
         raise SchemaViolation(f"cells: пустой cell_id: {_rows(df, null_id)}")
-    expected_prefix = pl.col("cell_id").str.split("_").list.first() == pl.col("dataset").cast(
-        pl.String
+    # Префикс проверяем через startswith, а не через split("_"): имя датасета
+    # само может содержать подчёркивание (sandia_rd).
+    expected_prefix = pl.col("cell_id").str.starts_with(
+        pl.col("dataset").cast(pl.String) + pl.lit("_")
     )
     if df.height and not bool(df.select(expected_prefix.all())[0, 0]):
         raise SchemaViolation(

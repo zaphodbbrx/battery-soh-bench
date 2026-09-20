@@ -14,6 +14,7 @@ from bsb.ingest.calce import CalceAdapter
 from bsb.ingest.kit import KitAdapter
 from bsb.ingest.oxford import OxfordAdapter
 from bsb.ingest.sandia import SandiaAdapter
+from bsb.ingest.sandia_rd import SandiaRdAdapter
 
 __all__ = [
     "ADAPTERS",
@@ -23,6 +24,7 @@ __all__ = [
     "KitAdapter",
     "OxfordAdapter",
     "SandiaAdapter",
+    "SandiaRdAdapter",
     "get_adapter",
 ]
 
@@ -31,6 +33,7 @@ ADAPTERS: dict[str, Callable[[BenchmarkConfig], DatasetAdapter]] = {
     CalceAdapter.name: CalceAdapter,
     KitAdapter.name: KitAdapter,
     SandiaAdapter.name: SandiaAdapter,
+    SandiaRdAdapter.name: SandiaRdAdapter,
 }
 
 

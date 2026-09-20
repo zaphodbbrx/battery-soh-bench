@@ -54,7 +54,10 @@ from bsb.ingest.base import (
     charge_throughput_by_cycle,
     classify_step,
     integrate_charge,
+    isolated_sign_flips,
+    plausible_mask,
     split_into_steps,
+    suppress_native_stderr,
     validate_raw_bundle,
 )
 from bsb.labels import build_labels
@@ -153,9 +156,11 @@ class CalceAdapter:
 
         step_frames: list[pl.DataFrame] = []
         cycle_rows: list[dict[str, Any]] = []
+        dropped_points = 0
         cycle_index = 0
         for _date, path, frame in recordings:
-            steps = self._steps_of(frame, max_gap_s=DEFAULT_MAX_GAP_S)
+            steps, dropped = self._steps_of(frame, max_gap_s=DEFAULT_MAX_GAP_S)
+            dropped_points += dropped
             if not steps:
                 notes.append(f"{path.name}: шаги не выделены")
                 continue
@@ -176,11 +181,28 @@ class CalceAdapter:
                     open_steps = []
             if open_steps:
                 notes.append(f"{path.name}: хвост без разряда, пропущен")
+        if dropped_points:
+            notes.append(
+                f"отброшено {dropped_points} точек: пустые строки и одиночные всплески "
+                "знака тока (ТЗ §4.3 запрещает пропуски и суррогаты)"
+            )
         if not step_frames:
             raise SchemaViolation(f"{src.cell_id}: не удалось собрать ни одного полного цикла")
         timeseries = pl.concat(step_frames)
         cycles = pl.DataFrame(cycle_rows)
-        cell = {
+        cell = self._cell_dict(src, timeseries, files=files, notes=notes)
+        return build_raw_bundle(cell, cycles, timeseries)
+
+    def _cell_dict(
+        self,
+        src: CellSource,
+        timeseries: pl.DataFrame,
+        *,
+        files: list[Path],
+        notes: list[str],
+    ) -> dict[str, Any]:
+        """Метаданные ячейки по §4.1. Отдельный метод — для переиспользования."""
+        return {
             "cell_id": src.cell_id,
             "dataset": self.name,
             "chemistry": "LCO",
@@ -191,7 +213,6 @@ class CalceAdapter:
             "batch_id": None,
             "notes": self._notes(files, notes),
         }
-        return build_raw_bundle(cell, cycles, timeseries)
 
     # ------------------------------------------------------------------
     # чтение форматов
@@ -232,12 +253,14 @@ class CalceAdapter:
         """
         # Читаем байты, а не путь: calamine иначе доверится расширению и
         # откажется открывать xlsx, названный .xls.
-        reader = fastexcel.read_excel(path.read_bytes())
+        with suppress_native_stderr():
+            reader = fastexcel.read_excel(path.read_bytes())
         frames: list[pl.DataFrame] = []
         for name in reader.sheet_names:
             if name == "Info":
                 continue
-            table = reader.load_sheet(name).to_polars()
+            with suppress_native_stderr():
+                table = reader.load_sheet(name).to_polars()
             if set(table.columns) >= self.ARBIN_REQUIRED_COLUMNS:
                 frames.append(self._normalize_arbin(table, path))
         if not frames:
@@ -293,11 +316,15 @@ class CalceAdapter:
     # шаги и циклы
     # ------------------------------------------------------------------
 
-    def _steps_of(self, frame: pl.DataFrame, *, max_gap_s: float) -> list[pl.DataFrame]:
+    def _steps_of(self, frame: pl.DataFrame, *, max_gap_s: float) -> tuple[list[pl.DataFrame], int]:
         """Разбить запись файла на непрерывные шаги.
 
         Границы: смена ``step_key`` программы и разрывы времени (перезапуск
         тестера оставляет в файле склеенные куски — как в Oxford).
+
+        Возвращает шаги и число отброшенных точек: в архиве Sandia в листах
+        встречаются полностью пустые строки (109 из 11563 в ``LCO_1_25C_Reg``),
+        а §4.3 запрещает протаскивать пропуски и суррогаты дальше.
         """
         if "temperature_c" not in frame.columns:
             frame = frame.with_columns(pl.lit(None, dtype=pl.Float64).alias("temperature_c"))
@@ -310,6 +337,7 @@ class CalceAdapter:
             .alias("_block")
         ).partition_by("_block", maintain_order=True)
         steps: list[pl.DataFrame] = []
+        dropped = 0
         for block in blocks:
             # Внутри шага программы тестер иногда успевает зарядить и разрядить
             # (в CS2_36 в одном Step_Index 7% точек идут с обратным знаком).
@@ -327,6 +355,21 @@ class CalceAdapter:
                 piece = block[start:stop]
                 if piece.height < 2:
                     continue
+                # Пустые строки листа и одиночные всплески знака тока — сбои
+                # записи; §4.3 требует не тащить их дальше.
+                mask = plausible_mask(
+                    piece["t_s"].to_numpy(),
+                    piece["current_a"].to_numpy(),
+                    piece["voltage_v"].to_numpy(),
+                    piece["temperature_c"].to_numpy(),
+                ) & ~isolated_sign_flips(
+                    piece["current_a"].to_numpy(),
+                    tolerance=self.config.step_labeling.current_sign_tolerance_a,
+                )
+                dropped += int((~mask).sum())
+                if int(mask.sum()) < 2:
+                    continue
+                piece = piece.filter(pl.Series(mask))
                 pieces = split_into_steps(
                     piece["t_s"].to_numpy(),
                     piece["current_a"].to_numpy(),
@@ -345,7 +388,7 @@ class CalceAdapter:
                             }
                         )
                     )
-        return steps
+        return steps, dropped
 
     @staticmethod
     def _sign_boundaries(current: np.ndarray, *, tolerance: float, min_run: int = 3) -> list[int]:

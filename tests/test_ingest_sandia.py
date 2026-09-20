@@ -9,7 +9,6 @@
 from __future__ import annotations
 
 import pickle
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -94,7 +93,7 @@ def test_capacity_check_is_the_reference_cycle(raw_dir: Path, repo_config: Bench
         assert discharge_current == pytest.approx(charge_current, rel=0.02)
 
 
-def part_cycle(cycle_index: int) -> Any:  # noqa: ANN401
+def part_cycle(cycle_index: int) -> Any:
     """Условие отбора одного цикла (вынесено ради читаемости)."""
     import polars as pl
 
@@ -118,14 +117,12 @@ def test_charge_ah_is_integrated_not_copied(raw_dir: Path, repo_config: Benchmar
     """§4.3: charge_ah получается интегрированием тока и начинается с нуля в шаге."""
     adapter = SandiaAdapter(repo_config)
     raw = adapter.load_cell(adapter.discover(raw_dir)[0])
-    for _kind, part in raw.timeseries.group_by("step_type", maintain_order=True):
-        pass
     first_cycle = raw.timeseries.filter(pl_col("cycle_index") == 1)
     for _step, part in first_cycle.group_by(pl_col("step_type"), maintain_order=True):
         assert abs(float(part["charge_ah"][0])) < 1e-9
 
 
-def pl_col(name: str) -> Any:  # noqa: ANN401
+def pl_col(name: str) -> Any:
     """Обёртка над ``pl.col`` (импорт внутри функции ради читаемости тестов)."""
     import polars as pl
 
@@ -237,7 +234,7 @@ def test_reference_rule_ignores_high_rate_cycles(repo_config: BenchmarkConfig) -
     assert raw.cycles.filter(raw.cycles["cycle_index"] == 2)["is_reference"][0] is False
 
 
-def _bundle_with_rates(config: BenchmarkConfig, adapter: SandiaAdapter) -> Any:  # noqa: ANN401
+def _bundle_with_rates(config: BenchmarkConfig, adapter: SandiaAdapter) -> Any:
     """Синтетическая ячейка: проверка 0.5C/0.5C и рабочий цикл 0.5C/2C."""
     from bsb.ingest.base import build_raw_bundle
 
