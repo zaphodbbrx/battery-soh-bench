@@ -32,7 +32,7 @@ fi
 # Порядок — по плану §15: Oxford первым (сквозная проверка пайплайна).
 # sandia_rd обязателен: он даёт обучению химии теста (NCA, NMC, LFP), и без него
 # основная номинация на бейзлайне падает с 4.79 до 9.35 п.п. (см.
-# reports/discharge_rate_shift.md). Наборы — те, что перечислены в
+# docs/04-ориентиры.md). Наборы — те, что перечислены в
 # splits.train_datasets / val_datasets / test_datasets.
 DATASETS=(oxford calce sandia_rd sandia kit)
 

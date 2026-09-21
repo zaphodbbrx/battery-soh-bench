@@ -26,3 +26,5 @@ htmlcov/
 # --- артефакты прогонов ---
 results.json
 noise_floor.json
+# Графики приёмки §14 генерируются scripts/acceptance_plots.py и не коммитятся.
+reports/
