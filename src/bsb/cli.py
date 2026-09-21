@@ -23,6 +23,7 @@ from bsb.dataset import iter_bundles, read_split_cell_ids
 from bsb.eval import evaluate, load_truth, render_report, run_eval, save_results
 from bsb.fragments import generate_fragments, strip_labels
 from bsb.ingest import ADAPTERS, get_adapter
+from bsb.ingest.base import build_raw_bundle, rebuild_raw_cycles
 from bsb.labels import NoReferenceCycles
 from bsb.schema import SchemaViolation, validate_bundle, validate_fragments
 from bsb.splits import CellLeakageError, assert_no_cell_leakage, load_splits, split_path
@@ -33,6 +34,7 @@ from bsb.store import (
     parts_dir,
     read_cells,
     read_cycles,
+    read_timeseries,
     write_bundle,
 )
 from bsb.validate_submission import (
@@ -49,9 +51,7 @@ EXIT_NOT_IMPLEMENTED = 3
 
 #: Команда → фаза плана §15, в которой она реализуется.
 #: Команды, ещё не реализованные, с фазой плана §15.
-_PENDING: dict[str, str] = {
-    "labels": "фаза 2",
-}
+_PENDING: dict[str, str] = {}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -89,6 +89,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     labels_parser = subparsers.add_parser("labels", help="разметить опорные циклы и посчитать soh")
     labels_parser.add_argument("--dataset", required=True, choices=sorted(ADAPTERS))
+    labels_parser.add_argument(
+        "--compact", action="store_true", help="сразу собрать unified-уровень"
+    )
 
     fragments_parser = subparsers.add_parser("fragments", help="сгенерировать фрагменты сплита")
     fragments_parser.add_argument("--split", required=True, choices=("train", "val", "test"))
@@ -234,6 +237,78 @@ def _cmd_ingest(config: BenchmarkConfig, args: argparse.Namespace) -> int:
         # Собираем все разобранные датасеты, а не только текущий: сборка
         # подмножества перезаписала бы cells.parquet без остальных.
         return _cmd_compact(config, argparse.Namespace(datasets=None))
+    return EXIT_OK
+
+
+def _cmd_labels(config: BenchmarkConfig, args: argparse.Namespace) -> int:
+    """Команда ``labels``: пересчитать опорные циклы и SOH (ТЗ §5, §13).
+
+    Работает по уже разобранному ``timeseries`` из унифицированного уровня и
+    заново применяет правило опорных циклов; сырые файлы не перечитываются.
+    Смысл в том, что правила §5 живут в конфиге, а их смена не должна требовать
+    повторного разбора сотен мегабайт Excel: разбор и разметка разделены, как в
+    плане §15 (фаза 2 — отдельная от фаз 1, 4, 6).
+
+    Ёмкость цикла не пересчитывается: она получена интегрированием тока при
+    разборе (§4.3) и хранится в унифицированном уровне. Команда заново решает,
+    какие циклы опорные, и по ним считает ``bol``, ``soh`` и ``soh_source``.
+    """
+    dataset = args.dataset
+    adapter = get_adapter(dataset, config)
+    cells = read_cells(config, datasets=[dataset])
+    if cells.height == 0:
+        print(
+            f"в унифицированном уровне нет ячеек датасета {dataset!r}: "
+            f"сначала bsb ingest --dataset {dataset}",
+            file=sys.stderr,
+        )
+        return EXIT_FAILURE
+
+    print(f"{dataset}: размечено {cells.height} ячеек из унифицированного уровня")
+    warnings: list[str] = []
+    failures: list[tuple[str, str]] = []
+    skipped: list[tuple[str, str]] = []
+    for index, cell in enumerate(cells.iter_rows(named=True), start=1):
+        cell_id = str(cell["cell_id"])
+        try:
+            # bol_capacity_ah появляется только после разметки, в сырой схеме
+            # его нет — иначе build_raw_bundle отвергнет лишнюю колонку.
+            raw_cell = {key: value for key, value in cell.items() if key != "bol_capacity_ah"}
+            timeseries = read_timeseries(config, cell_id)
+            # Кандидаты берём из timeseries, а не из таблицы cycles: там лежат
+            # только опорные циклы, и переприменять правило было бы не к чему.
+            cycles = rebuild_raw_cycles(cell_id, timeseries)
+            bundle = adapter.mark_reference_cycles(build_raw_bundle(raw_cell, cycles, timeseries))
+            warnings.extend(f"{cell_id}: {item}" for item in validate_bundle(bundle))
+            write_bundle(config, bundle, dataset=dataset)
+        except NoReferenceCycles as exc:
+            skipped.append((cell_id, str(exc)))
+            continue
+        except Exception as exc:
+            failures.append((cell_id, str(exc)))
+            print(f"  [{index}/{cells.height}] {cell_id}: ОШИБКА: {exc}", file=sys.stderr)
+            continue
+        print(
+            f"  [{index}/{cells.height}] {cell_id}: "
+            f"{bundle.cycles.filter(pl.col('is_reference')).height} опорных циклов из "
+            f"{bundle.cycles.height}"
+        )
+    for warning in warnings:
+        print(f"предупреждение: {warning}", file=sys.stderr)
+    print(f"записано в {parts_dir(config, dataset)}")
+    if skipped:
+        print(
+            f"пропущено записей без опорных циклов: {len(skipped)} "
+            f"(например, только частичные циклы), первые: {[item[0] for item in skipped[:3]]}",
+            file=sys.stderr,
+        )
+    if failures:
+        print(f"не размечено ячеек: {len(failures)} из {cells.height}", file=sys.stderr)
+    if args.compact:
+        # Как и в ingest: собираем все датасеты сразу, иначе cells.parquet
+        # потеряет остальные.
+        return _cmd_compact(config, argparse.Namespace(datasets=None))
+    print("чтобы изменения попали в унифицированный уровень: bsb compact")
     return EXIT_OK
 
 
@@ -481,6 +556,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "splits_check": lambda cfg: _cmd_splits_check(cfg),
             "compact": lambda cfg: _cmd_compact(cfg, args),
             "ingest": lambda cfg: _cmd_ingest(cfg, args),
+            "labels": lambda cfg: _cmd_labels(cfg, args),
             "fragments": lambda cfg: _cmd_fragments(cfg, args),
             "validate": lambda cfg: _cmd_validate(cfg, args),
             "eval": lambda cfg: _cmd_eval(cfg, args),

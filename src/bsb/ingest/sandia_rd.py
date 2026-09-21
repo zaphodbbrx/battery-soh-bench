@@ -323,8 +323,18 @@ class SandiaRdAdapter(CalceAdapter):
 
     @staticmethod
     def _modal_rate(current: pl.Series) -> float:
-        """Модальный ток разряда: в одном файле циклы идут на разных токах."""
-        counts = current.round(2).alias("value").value_counts(sort=True)
+        """Модальный ток разряда: в одном файле циклы идут на разных токах.
+
+        Сортировка по счётчику, а при равенстве — по значению тока. Одного
+        ``value_counts(sort=True)`` мало: при равных счётчиках порядок не
+        определён, и на ``NCA_1_25C_Reg`` (шесть циклов на 2.70 А против
+        четырёх на 5.00 А, но токи округляются в соседние корзины 2.70/2.71)
+        разметка прыгала между {1..6} и {7..11} от запуска к запуску. Меньший
+        ток выбран как детерминированный тайбрейк: он ближе к тому, что в
+        бенчмарке считается опорным разрядом.
+        """
+        counts = current.round(2).alias("value").value_counts(sort=False)
         if counts.height == 0:
             raise SchemaViolation("не удалось определить модальный ток разряда")
-        return float(counts["value"][0])
+        ordered = counts.sort(["count", "value"], descending=[True, False])
+        return float(ordered["value"][0])

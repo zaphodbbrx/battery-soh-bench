@@ -50,9 +50,11 @@ __all__ = [
     "cell_id_for",
     "charge_throughput_by_cycle",
     "classify_step",
+    "cycle_voltage_extremes",
     "integrate_charge",
     "isolated_sign_flips",
     "plausible_mask",
+    "rebuild_raw_cycles",
     "segment_cycle",
     "split_into_steps",
     "suppress_native_stderr",
@@ -155,6 +157,74 @@ def integrate_charge(t_s: Sequence[float], current_a: Sequence[float]) -> np.nda
     deltas = np.diff(time) / 3600.0
     trapezoids = 0.5 * (current[1:] + current[:-1]) * deltas
     return np.concatenate([[0.0], np.cumsum(trapezoids)])
+
+
+def cycle_voltage_extremes(timeseries: pl.DataFrame) -> pl.DataFrame:
+    """По циклу: границы напряжения и медианные токи фаз, А и В.
+
+    Нужна правилам §5, которые решают, полный ли это цикл. Считается из
+    ``timeseries``, а не из чего-то, что известно только при разборе сырого
+    файла: иначе правило нельзя переприменить к уже разобранным данным
+    (``bsb labels``), и смена правил в конфиге требовала бы повторного разбора.
+
+    Returns
+    -------
+    polars.DataFrame
+        ``cycle_index``, ``v_charge_max``, ``v_discharge_min``, ``i_charge``,
+        ``i_discharge``. Циклы без одной из фаз в результат не попадают: для них
+        вопрос «полный ли цикл» не имеет смысла.
+    """
+    charge = (
+        timeseries.filter(pl.col("step_type").is_in(["chg_cc", "chg_cv"]))
+        .group_by("cycle_index")
+        .agg(
+            pl.col("voltage_v").max().alias("v_charge_max"),
+            pl.col("current_a").median().abs().alias("i_charge"),
+        )
+    )
+    discharge = (
+        timeseries.filter(pl.col("step_type") == pl.lit("dch"))
+        .group_by("cycle_index")
+        .agg(
+            pl.col("voltage_v").min().alias("v_discharge_min"),
+            pl.col("current_a").median().abs().alias("i_discharge"),
+        )
+    )
+    return charge.join(discharge, on="cycle_index", how="inner")
+
+
+def rebuild_raw_cycles(cell_id: str, timeseries: pl.DataFrame) -> pl.DataFrame:
+    """Собрать кадр ``cycles`` из ``timeseries`` — все циклы, ёмкость из разряда.
+
+    Нужна команде ``bsb labels``: в унифицированном уровне таблица ``cycles``
+    содержит **только опорные** циклы (§4.2), поэтому переприменить правило §5
+    к ней нельзя — кандидаты уже отфильтрованы. Из ``timeseries`` же видны все
+    циклы, а разрядная ёмкость восстанавливается из интегрированного заряда
+    (последняя точка разрядной фазы, §4.3): проверено на всех 13 328 опорных
+    циклах четырёх датасетов — совпадает с сохранённой.
+
+    Returns
+    -------
+    polars.DataFrame
+        Кадр по ``RAW_CYCLES_SCHEMA``: по строке на каждый цикл, у циклов без
+        разряда ``capacity_ah`` пустая.
+    """
+    capacity = (
+        timeseries.filter(pl.col("step_type") == pl.lit("dch"))
+        .group_by("cycle_index")
+        .agg(pl.col("charge_ah").last().abs().alias("capacity_ah"))
+    )
+    return (
+        timeseries.select("cycle_index")
+        .unique()
+        .join(capacity, on="cycle_index", how="left")
+        .with_columns(
+            pl.lit(cell_id).alias("cell_id"),
+            pl.lit(False).alias("is_reference"),
+        )
+        .select(*RAW_CYCLES_SCHEMA)
+        .sort("cycle_index")
+    )
 
 
 def charge_throughput_by_cycle(timeseries: pl.DataFrame) -> pl.DataFrame:

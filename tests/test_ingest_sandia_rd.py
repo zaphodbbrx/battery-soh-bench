@@ -231,3 +231,28 @@ def test_round_trip_through_store(
     cells = read_cells(config)
     assert cells.height == 1
     assert cells["dataset"].to_list() == ["sandia_rd"]
+
+
+def test_modal_rate_is_deterministic_on_ties(repo_config: BenchmarkConfig) -> None:
+    """При равных счётчиках модальный ток выбирается одинаково от запуска к запуску.
+
+    Регрессия: ``value_counts(sort=True)`` при равных счётчиках даёт
+    неопределённый порядок, и на реальной записи ``NCA_1_25C_Reg`` (токи
+    округляются в соседние корзины 2.70 и 2.71) разметка опорных циклов
+    прыгала между {1..6} и {7..11}. Меньший ток — детерминированный тайбрейк.
+    """
+    adapter = SandiaRdAdapter(repo_config)
+    # Три корзины с одинаковым счётчиком: 2.70, 2.71 и 5.00.
+    current = pl.Series([2.704, 2.705, 2.706, 2.714, 2.715, 2.716, 5.004, 5.005, 5.006])
+
+    rates = {adapter._modal_rate(current) for _ in range(20)}
+
+    assert rates == {2.7}
+
+
+def test_modal_rate_prefers_the_more_frequent_bucket(repo_config: BenchmarkConfig) -> None:
+    """Счётчик важнее тайбрейка: редкий медленный ток не перебивает частый."""
+    adapter = SandiaRdAdapter(repo_config)
+    current = pl.Series([2.70, 5.00, 5.00, 5.00])
+
+    assert adapter._modal_rate(current) == 5.0

@@ -38,6 +38,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from itertools import pairwise
 from pathlib import Path
 from typing import Any, Final
@@ -53,6 +54,7 @@ from bsb.ingest.base import (
     build_raw_bundle,
     charge_throughput_by_cycle,
     classify_step,
+    cycle_voltage_extremes,
     integrate_charge,
     isolated_sign_flips,
     plausible_mask,
@@ -510,6 +512,25 @@ class CalceAdapter:
             "is_reference": is_reference,
         }
 
+    def _recompute_reference(self, bundle: RawBundle, rule: Mapping[str, Any]) -> pl.DataFrame:
+        """Пересчитать ``is_reference`` по границам напряжения из правила §5."""
+        full_charge_v = float(rule.get("full_charge_voltage_v", 4.15))
+        full_discharge_v = float(rule.get("full_discharge_voltage_v", 2.75))
+        extremes = cycle_voltage_extremes(bundle.timeseries)
+        flags = extremes.select(
+            "cycle_index",
+            (
+                (pl.col("v_charge_max") >= full_charge_v)
+                & (pl.col("v_discharge_min") <= full_discharge_v)
+            ).alias("_full"),
+        )
+        return (
+            bundle.cycles.drop("is_reference")
+            .join(flags, on="cycle_index", how="left")
+            .with_columns(pl.col("_full").fill_null(False).alias("is_reference"))
+            .drop("_full")
+        )
+
     @staticmethod
     def _drop_shallow_charges(
         cycles: pl.DataFrame, bundle: RawBundle, *, rel: float
@@ -597,6 +618,10 @@ class CalceAdapter:
         Опорным считается цикл, прошедший полный заряд (до верхней границы) и
         полный разряд (до нижней). Частичные циклы типов 4-6 и циклы со
         случайной отсечкой дают несопоставимую ёмкость и в опорные не попадают.
+
+        Признак опорного цикла пересчитывается из ``timeseries``, а не берётся
+        из входного кадра: тогда правило можно применить заново к уже
+        разобранным данным (``bsb labels``), не перечитывая сырые файлы.
         """
         warnings = validate_raw_bundle(bundle)
         rule = self.config.labels.rule(self.name)
@@ -605,7 +630,7 @@ class CalceAdapter:
             raise NotImplementedError(
                 f"calce: стратегия {strategy!r} не реализована (ожидается every_full_cycle)"
             )
-        cycles = bundle.cycles
+        cycles = self._recompute_reference(bundle, rule)
         min_throughput_rel = float(rule.get("min_charge_throughput_rel", 0.0))
         if min_throughput_rel > 0:
             cycles, shallow = self._drop_shallow_charges(cycles, bundle, rel=min_throughput_rel)

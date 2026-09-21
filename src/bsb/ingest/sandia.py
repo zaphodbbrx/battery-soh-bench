@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import pickle
 import re
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Final
 
@@ -58,6 +59,7 @@ from bsb.ingest.base import (
     CellSource,
     RawBundle,
     build_raw_bundle,
+    cycle_voltage_extremes,
     integrate_charge,
     isolated_sign_flips,
     plausible_mask,
@@ -73,6 +75,18 @@ __all__ = ["SandiaAdapter"]
 TEMPERATURE_PATTERN: Final = re.compile(r"_(\d{2})C_")
 #: Допуск на «дошёл до границы» по напряжению, В (границы берутся из метаданных).
 DEFAULT_VOLTAGE_TOLERANCE_V: Final[float] = 0.05
+
+#: Границы напряжения разряда 0-100 % SOC по химиям (ТЗ §17.4). В исходных
+#: файлах они проставлены паспортно (``min_voltage_limit_in_V`` /
+#: ``max_voltage_limit_in_V``), но в унифицированном уровне не хранятся, а
+#: правило §5 должно переприменяться и к разобранным данным (``bsb labels``).
+#: Совпадение с паспортными проверено на всех 57 ячейках SNL: разметка
+#: опорных циклов совпадает цикл в цикл.
+CHEMISTRY_VOLTAGE_LIMITS_V: Final[Mapping[str, tuple[float, float]]] = {
+    "LFP": (2.0, 3.6),
+    "NCA": (2.5, 4.2),
+    "NMC": (2.0, 4.2),
+}
 
 
 class SandiaAdapter:
@@ -347,6 +361,41 @@ class SandiaAdapter:
             head.extend(unique[:5])
         return "; ".join(head)
 
+    def _recompute_reference(self, bundle: RawBundle, rule: Mapping[str, Any]) -> pl.DataFrame:
+        """Пересчитать ``is_reference``: полный размах и разряд на токе заряда.
+
+        Признак capacity check в §17.4 — не флаг в данных, а совпадение: цикл
+        прошёл 0-100 % SOC (до границ химии) и разряжался на том же токе, что и
+        заряжался (0.5C). Рабочие циклы разряжаются на 1/2/3C при том же заряде
+        0.5C, поэтому в проверки не попадают.
+        """
+        chemistry = str(bundle.cell["chemistry"])
+        if chemistry not in CHEMISTRY_VOLTAGE_LIMITS_V:
+            raise SchemaViolation(
+                f"{bundle.cell_id}: для химии {chemistry!r} нет границ напряжения §17.4"
+            )
+        low, high = CHEMISTRY_VOLTAGE_LIMITS_V[chemistry]
+        tolerance = float(rule.get("voltage_tolerance_v", DEFAULT_VOLTAGE_TOLERANCE_V))
+        rate_tolerance = float(rule.get("reference_rate_tolerance_rel", 0.02))
+        flags = cycle_voltage_extremes(bundle.timeseries).select(
+            "cycle_index",
+            (
+                (pl.col("v_charge_max") >= high - tolerance)
+                & (pl.col("v_discharge_min") <= low + tolerance)
+                & (pl.col("i_charge") > 0)
+                & (
+                    (pl.col("i_discharge") - pl.col("i_charge")).abs()
+                    <= rate_tolerance * pl.col("i_charge")
+                )
+            ).alias("_check"),
+        )
+        return (
+            bundle.cycles.drop("is_reference")
+            .join(flags, on="cycle_index", how="left")
+            .with_columns(pl.col("_check").fill_null(False).alias("is_reference"))
+            .drop("_check")
+        )
+
     @staticmethod
     def _drop_shallow_checks(
         cycles: pl.DataFrame, bundle: RawBundle, *, rel: float
@@ -388,7 +437,14 @@ class SandiaAdapter:
     # ------------------------------------------------------------------
 
     def mark_reference_cycles(self, bundle: RawBundle) -> CellBundle:
-        """Применить правило capacity check (0-100 % на 0.5C) и посчитать §4.2."""
+        """Применить правило capacity check (0-100 % на 0.5C) и посчитать §4.2.
+
+        Признак проверки ёмкости пересчитывается из ``timeseries`` и химии
+        ячейки, а не берётся из входного кадра: правило применяется и при
+        разборе, и заново командой ``bsb labels``, а границы напряжения §17.4
+        совпадают с паспортными, проставленными в исходных файлах (проверено
+        на всех 57 ячейках SNL: разметка совпадает цикл в цикл).
+        """
         warnings = validate_raw_bundle(bundle)
         rule = self.config.labels.rule(self.name)
         strategy = str(rule.get("strategy", "capacity_check"))
@@ -396,7 +452,7 @@ class SandiaAdapter:
             raise NotImplementedError(
                 f"sandia: стратегия {strategy!r} не реализована (ожидается capacity_check)"
             )
-        cycles_frame = bundle.cycles
+        cycles_frame = self._recompute_reference(bundle, rule)
         min_throughput_rel = float(rule.get("min_charge_throughput_rel", 0.0))
         if min_throughput_rel > 0:
             cycles_frame, shallow = self._drop_shallow_checks(

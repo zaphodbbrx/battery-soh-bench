@@ -383,6 +383,11 @@ class OxfordAdapter:
         измеренной разрядной ёмкостью. Порог
         ``labels.reference_cycle_rules.oxford.discharge_current_tolerance_c``
         используется как проверка, что разряд действительно медленный CC.
+
+        Признак опорного цикла пересчитывается здесь, а не берётся из входного
+        кадра: правило должно переприменяться к уже разобранным данным
+        (``bsb labels``). Содержательно условие то же — цикл с измеренной
+        разрядной ёмкостью.
         """
         warnings = validate_raw_bundle(bundle)
         rule = self.config.labels.rule(self.name)
@@ -403,7 +408,9 @@ class OxfordAdapter:
                     f"отличается от C/18.5 ({slow_discharge_a * 1000:.1f} мА) больше чем на "
                     f"{tolerance:.0%}"
                 )
-        cycles = bundle.cycles
+        cycles = bundle.cycles.drop("is_reference").with_columns(
+            pl.col("capacity_ah").is_not_null().alias("is_reference")
+        )
         if bool(rule.get("require_full_charge", False)):
             cycles, excluded = self._drop_incomplete_charges(cycles, bundle)
             if excluded:
