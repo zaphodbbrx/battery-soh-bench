@@ -173,13 +173,27 @@ class SandiaRdAdapter(CalceAdapter):
     def mark_reference_cycles(self, bundle: RawBundle) -> CellBundle:
         """Опорные циклы по данным самой ячейки, затем §4.2 через :mod:`bsb.labels`.
 
-        Три условия: полный размах напряжения (до собственных границ ячейки),
-        модальный ток разряда и перенесённый заряд не меньше половины ``bol``.
+        Условия: полный размах напряжения (до собственных границ ячейки),
+        модальный ток разряда, **баланс заряда и разряда** и физически
+        возможная скорость разряда, а также перенесённый заряд не меньше
+        половины ``bol``.
+
+        Про баланс. Архив Barkholtz — это исследование скоростных
+        возможностей, а не старения: 78 файлов из 179 сняты с суффиксом
+        ``_Mod`` и содержат импульсные разряды. В ``LFP_3_15C_Mod`` заряд
+        переносит 0.865 А·ч, а «разряд» — импульс 20 А длительностью 40 с,
+        то есть 0.222 А·ч. Разрядная ёмкость такого цикла измеряет не ячейку,
+        а длину импульса, и без проверки баланса она попадала в опорные:
+        SOH выходил ровно 1.0, а иногда и 1.17 (когда импульс оказывался
+        длиннее первого). Проверка баланса отсекает эти записи по данным,
+        не по имени файла.
         """
         rule = self.config.labels.rule(self.name)
         tolerance = float(rule.get("voltage_tolerance_v", 0.05))
         rate_tolerance = float(rule.get("discharge_rate_tolerance_rel", 0.02))
         min_throughput_rel = float(rule.get("min_charge_throughput_rel", 0.5))
+        balance_tolerance = float(rule.get("charge_balance_tolerance_rel", 0.35))
+        max_rate_c = float(rule.get("max_reference_rate_c", 3.0))
 
         stats = self._cycle_stats(bundle.timeseries)
         if stats.height == 0:
@@ -197,6 +211,41 @@ class SandiaRdAdapter(CalceAdapter):
             pl.col("_shape").fill_null(False).alias("is_reference")
         )
 
+        throughput = charge_throughput_by_cycle(bundle.timeseries)
+        cycles = (
+            cycles.join(throughput, on="cycle_index", how="left")
+            .with_columns(pl.col("q_charge").fill_null(0.0))
+            .join(
+                stats.select("cycle_index", "i_discharge"),
+                on="cycle_index",
+                how="left",
+            )
+        )
+
+        # Баланс: разряд обязан вернуть примерно столько же, сколько вошло при
+        # заряде. У импульсных записей отношение 0.25-0.56, у настоящих циклов
+        # оно около единицы (по архиву медиана 1.055).
+        balanced = (
+            (pl.col("q_charge") > 0)
+            & ((pl.col("capacity_ah") / pl.col("q_charge") - 1.0).abs() <= balance_tolerance)
+        ).fill_null(False)
+        # Скорость считаем от ёмкости самого цикла, а не от bol: bol ещё не
+        # выбран, и опираться на него здесь означало бы замкнутый круг.
+        rate_ok = (
+            (pl.col("capacity_ah") > 0)
+            & (pl.col("i_discharge") / pl.col("capacity_ah") <= max_rate_c)
+        ).fill_null(False)
+        cycles = cycles.with_columns(balanced.alias("_balanced"), rate_ok.alias("_rate_ok"))
+        dropped_balance = int((cycles["is_reference"] & ~cycles["_balanced"]).sum())
+        dropped_rate = int(
+            (cycles["is_reference"] & cycles["_balanced"] & ~cycles["_rate_ok"]).sum()
+        )
+        cycles = cycles.with_columns(
+            (pl.col("is_reference") & pl.col("_balanced") & pl.col("_rate_ok")).alias(
+                "is_reference"
+            )
+        )
+
         # Порог перенесённого заряда: bol берём по первому подходящему циклу,
         # он снят на свежей ячейке.
         candidates = cycles.filter(
@@ -204,19 +253,17 @@ class SandiaRdAdapter(CalceAdapter):
         ).sort("cycle_index")
         if candidates.height == 0:
             raise NoReferenceCycles(
-                f"{bundle.cell_id}: полных циклов с модальным током разряда нет "
-                "(в файле только частичные циклы)"
+                f"{bundle.cell_id}: полных сбалансированных циклов с модальным "
+                "током разряда нет (в файле только частичные или импульсные циклы)"
             )
         bol = float(candidates["capacity_ah"][0])
-        throughput = charge_throughput_by_cycle(bundle.timeseries)
-        joined = cycles.join(throughput, on="cycle_index", how="left").with_columns(
-            pl.col("q_charge").fill_null(0.0)
-        )
-        dropped_shape = int((~joined["is_reference"]).sum())
-        weak = joined.filter(
+        dropped_shape = int((~cycles["is_reference"]).sum())
+        weak = cycles.filter(
             pl.col("is_reference") & (pl.col("q_charge") < min_throughput_rel * bol)
         )
-        cycles = joined.drop("q_charge", "_shape").with_columns(
+        cycles = cycles.drop(
+            "q_charge", "_shape", "i_discharge", "_balanced", "_rate_ok"
+        ).with_columns(
             (pl.col("is_reference") & ~pl.col("cycle_index").is_in(weak["cycle_index"])).alias(
                 "is_reference"
             )
@@ -231,6 +278,17 @@ class SandiaRdAdapter(CalceAdapter):
             f"{bundle.cell_id}: {dropped_shape} из {cycles.height} циклов не имеют полного "
             f"размаха при модальном токе {modal_rate:.2f} А, в опорные не попали",
         ]
+        if dropped_balance:
+            warnings.append(
+                f"{bundle.cell_id}: {dropped_balance} полных циклов отброшены по "
+                f"балансу заряда и разряда (допуск {balance_tolerance:.0%}) — "
+                "импульсный разряд измеряет не ёмкость ячейки"
+            )
+        if dropped_rate:
+            warnings.append(
+                f"{bundle.cell_id}: {dropped_rate} циклов отброшены как физически "
+                f"невозможные по скорости разряда (выше {max_rate_c:g}C)"
+            )
         if weak.height:
             warnings.append(
                 f"{bundle.cell_id}: {weak.height} циклов перенесли меньше "

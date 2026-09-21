@@ -67,9 +67,7 @@ def build_splits(config: BenchmarkConfig) -> dict[str, list[str]]:
     available = set(cells["cell_id"].to_list())
     rule = config.splits.val_rule
 
-    test = sorted(
-        cells.filter(pl.col("dataset").is_in(list(config.splits.test_datasets)))["cell_id"]
-    )
+    test = set(cells.filter(pl.col("dataset").is_in(list(config.splits.test_datasets)))["cell_id"])
     val = set(rule.all_cells)
     # Из Barkholtz берём целые физические ячейки: у них batch_id — это имя
     # ячейки, а записи одной ячейки отличаются температурой и режимом.
@@ -82,10 +80,20 @@ def build_splits(config: BenchmarkConfig) -> dict[str, list[str]]:
     missing = sorted(val - available)
     if missing:
         raise SystemExit(f"правило val ссылается на ячейки, которых нет в хранилище: {missing[:5]}")
-    train = sorted(available - val - set(test))
+    # train ограничен splits.train_datasets: без этого переключатель A/B
+    # («с Barkholtz и без») не действовал бы, и датасет попадал бы в обучение
+    # независимо от конфига.
+    train = set(
+        cells.filter(pl.col("dataset").is_in(list(config.splits.train_datasets)))["cell_id"]
+    )
+    train -= val | test
     if not train:
-        raise SystemExit("train пуст: правило val забрало все ячейки")
-    return {"train": train, "val": sorted(val), "test": test}
+        raise SystemExit("train пуст: правило val забрало все ячейки обучения")
+    if not val <= set(
+        cells.filter(pl.col("dataset").is_in(list(config.splits.val_datasets)))["cell_id"]
+    ):
+        raise SystemExit("val содержит ячейки датасетов, которых нет в splits.val_datasets")
+    return {"train": sorted(train), "val": sorted(val), "test": sorted(test)}
 
 
 def main() -> int:

@@ -38,15 +38,16 @@ CYCLE_SUFFIXES = (0, 3200, 8200)
 STEPS = ("C1ch", "C1dc", "OCVch", "OCVdc")
 ARRAYS = ("t", "v", "q", "T")
 
+#: Файл архива Sandia R&D для фикстуры. Берём ``_Reg``, а не ``_Mod``: файлы
+#: ``_Mod`` — импульсные тесты скоростных возможностей (заряд 0.865 А·ч против
+#: импульса разряда 0.222 А·ч), и адаптер обоснованно их отвергает по балансу
+#: заряда и разряда. Из ``_Reg`` выбран самый маленький файл, дающий больше
+#: одного опорного цикла.
+SANDIA_RD_SOURCE = "Sandia Cell Cycle Testing Data/NCA_6/NCA_6_35C_Reg.xls"
+SANDIA_RD_FIXTURE = "sandia_rd_NCA_Reg_sample.xls"
+
 #: Файлы CALCE копируются в фикстуры как есть: один Arbin (Excel) и один CADEX
 #: (txt). Они уже небольшие, вырезать из них нечего.
-#: Файл архива Sandia R&D для фикстуры. Выбран самый маленький файл, который
-#: даёт больше одного опорного цикла: файлы 45 °C содержат только частичные
-#: циклы и адаптер их обоснованно пропускает, поэтому «просто самый маленький»
-#: не годится.
-SANDIA_RD_SOURCE = "Sandia Cell Cycle Testing Data/NMC_1_5C-15C/NMC_1_15C_Mod.xls"
-SANDIA_RD_FIXTURE = "sandia_rd_NMC_sample.xls"
-
 CALCE_FIXTURES = {
     "CS2_33/CS2_33/CS2_33_10_05_10.xlsx": "calce_CS2_33_arbin.xlsx",
     "CS2_8/CS2_8/CS2_8_1_28_10.txt": "calce_CS2_8_cadex.txt",

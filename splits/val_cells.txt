@@ -11,13 +11,9 @@ calce_CS2_37
 oxford_Cell7
 oxford_Cell8
 sandia_rd_NCA_1_15C_Reg
-sandia_rd_NCA_1_25C_Mod
 sandia_rd_NCA_1_25C_Reg
-sandia_rd_NCA_1_35C_Mod
 sandia_rd_NCA_1_35C_Reg
 sandia_rd_NCA_1_5C_Reg
 sandia_rd_NCA_2_15C_Reg
-sandia_rd_NCA_2_25C_Mod
 sandia_rd_NCA_2_25C_Reg
-sandia_rd_NCA_2_35C_Mod
 sandia_rd_NCA_2_35C_Reg
