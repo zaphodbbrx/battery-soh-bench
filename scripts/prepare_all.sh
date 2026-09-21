@@ -9,11 +9,23 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-PYTHON="${PYTHON:-$ROOT/.venv/bin/python}"
-BSB=("$PYTHON" -m bsb.cli)
+# Окружение: если в проекте есть uv, он и запускает команды — тогда версии
+# ровно те, что в uv.lock. Иначе берём интерпретатор из .venv (pip-путь).
+# Переменная PYTHON позволяет указать свой интерпретатор явно.
+if [[ -n "${PYTHON:-}" ]]; then
+    BSB=("$PYTHON" -m bsb.cli)
+elif command -v uv >/dev/null 2>&1; then
+    BSB=(uv run --quiet python -m bsb.cli)
+else
+    PYTHON="$ROOT/.venv/bin/python"
+    BSB=("$PYTHON" -m bsb.cli)
+fi
 
-if [[ ! -x "$PYTHON" ]]; then
-    echo "нет интерпретатора $PYTHON — создайте окружение: python -m venv .venv && .venv/bin/pip install -e '.[dev]'" >&2
+if [[ -z "${PYTHON:-}" ]] && ! command -v uv >/dev/null 2>&1 && [[ ! -x "$ROOT/.venv/bin/python" ]]; then
+    echo "нет окружения: установите uv (https://docs.astral.sh/uv/) и выполните" >&2
+    echo "    uv sync" >&2
+    echo "либо создайте окружение вручную:" >&2
+    echo "    python -m venv .venv && .venv/bin/pip install -e '.[dev]'" >&2
     exit 1
 fi
 

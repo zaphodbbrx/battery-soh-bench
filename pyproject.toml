@@ -21,14 +21,36 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Путь для pip: `pip install -e ".[dev]"`. Тот же список продублирован в
+# [dependency-groups].dev ниже — так `uv sync` без флагов ставит dev-инструменты
+# сам. Совпадение списков проверяет tests/test_packaging.py.
 dev = [
     "pytest>=8.0",
     "ruff>=0.6",
     "matplotlib>=3.8",
+    # Нужен тестам упаковки (tests/test_packaging.py): разбор требований и версий.
+    "packaging>=23.0",
+]
+
+[dependency-groups]
+# Ставится `uv sync` по умолчанию (см. [tool.uv].default-groups).
+# Список обязан совпадать с [project.optional-dependencies].dev.
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+    "matplotlib>=3.8",
+    # Нужен тестам упаковки (tests/test_packaging.py): разбор требований и версий.
+    "packaging>=23.0",
 ]
 
 [project.scripts]
 bsb = "bsb.cli:main"
+
+[tool.uv]
+# Одна команда для студента: `uv sync` создаёт .venv, ставит пакет в editable
+# режиме и dev-зависимости из группы dev. Интерпретатор берётся по
+# .python-version (3.12); если его нет в системе, uv скачает свой.
+default-groups = ["dev"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

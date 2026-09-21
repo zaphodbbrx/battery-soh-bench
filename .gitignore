@@ -10,9 +10,9 @@ build/
 dist/
 __pycache__/
 *.py[cod]
-.python-version
 
 # --- инструменты ---
+# .python-version коммитится: по нему uv выбирает интерпретатор (см. README).
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/

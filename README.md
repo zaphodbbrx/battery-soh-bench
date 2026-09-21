@@ -13,15 +13,40 @@ LFP — отдельная бонусная номинация).
 
 ## Установка
 
+Нужен только [uv](https://docs.astral.sh/uv/) — он сам скачает нужный Python
+(3.12), создаст окружение и поставит зависимости строго по `uv.lock`:
+
 ```bash
 git clone <repo> && cd battery-soh-bench
-python3.11 -m venv .venv && source .venv/bin/activate
+uv sync
+uv run bsb config-check
+```
+
+Одна команда `uv sync` делает всё: интерпретатор, `.venv`, сам пакет в режиме
+editable и dev-инструменты (`pytest`, `ruff`). Дальше любую команду запускайте
+через `uv run` — например `uv run pytest` или `uv run bsb baseline`; `uv run`
+подхватывает окружение проекта, активировать его вручную не нужно.
+
+Установка uv — одна строка: `curl -LsSf https://astral.sh/uv/install.sh | sh`
+(или `pipx install uv`, или `brew install uv`).
+
+<details>
+<summary>Если uv недоступен: путь через pip</summary>
+
+```bash
+python3.12 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 bsb config-check
 ```
 
+Список dev-зависимостей живёт в двух местах — `[project.optional-dependencies]`
+для pip и `[dependency-groups]` для uv; совпадение проверяет
+`tests/test_packaging.py`, так что расходиться они не могут.
+
+</details>
+
 Данные в репозиторий не входят (ТЗ §3). Скачайте их скриптами из `scripts/`,
-затем выполните `scripts/prepare_all.sh`.
+затем выполните `scripts/prepare_all.sh` (он сам выберет uv, если тот есть).
 
 ## Быстрый старт
 
@@ -45,6 +70,9 @@ bsb eval --submission submission.csv
 ## Раскладка
 
 ```
+pyproject.toml           зависимости и инструменты; dev-список общий для uv и pip
+uv.lock                  зафиксированные версии, коммитится: окружение у всех одинаковое
+.python-version          версия интерпретатора для uv (3.12), коммитится
 configs/benchmark.yaml   единственный источник правды по параметрам (ТЗ §3)
 splits/                  списки cell_id по сплитам, коммитятся (ТЗ §8)
 data/                    gitignore; наполняется скриптами
