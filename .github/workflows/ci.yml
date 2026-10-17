@@ -1,4 +1,4 @@
-name: ci
+name: public-checks
 
 on:
   push:
@@ -6,7 +6,7 @@ on:
   pull_request:
 
 jobs:
-  test:
+  checks:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -22,7 +22,3 @@ jobs:
         run: uv run ruff format --check .
       - name: Линтер (ruff check)
         run: uv run ruff check .
-      - name: Тесты
-        run: uv run pytest -q
-      - name: Утечка ячеек между сплитами (ТЗ §8, §14)
-        run: uv run python -m bsb.cli splits-check

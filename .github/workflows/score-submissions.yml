@@ -1,0 +1,41 @@
+name: score-submissions
+
+on:
+  pull_request_target:
+    branches: [main]
+    types: [opened, reopened, synchronize, edited, closed]
+    paths:
+      - "submissions/**/submission.csv"
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+
+concurrency:
+  group: submissions-leaderboard
+  cancel-in-progress: false
+
+jobs:
+  score:
+    if: github.event.pull_request.head.repo != null
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Установить доверенную версию оценщика
+        run: uv sync --locked
+      - name: Проверить сабмиты и обновить результаты
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_TOKEN: ${{ github.token }}
+          BSB_TEST_TRUTH_B85: ${{ secrets.BSB_TEST_TRUTH_B85 }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_ACTION: ${{ github.event.action }}
+        run: uv run python scripts/score_pull_requests.py
