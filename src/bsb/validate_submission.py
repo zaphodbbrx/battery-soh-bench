@@ -135,7 +135,7 @@ def validate_submission(
         Путь к CSV/parquet либо уже прочитанный кадр.
     expected_ids
         Полный список ``fragment_id`` теста. Если не задан, берётся из
-        ``config.paths.fragments_path("test")`` (эталонный файл организатора).
+        ``config.paths.fragments_path("test", labeled=False)`` (публичный тестовый файл).
     config
         Конфиг: границы предсказания (``eval.prediction_bounds``) и путь к
         тестовым фрагментам.
@@ -254,7 +254,7 @@ def validate_submission(
     elif config is not None:
         warnings.append(
             "список fragment_id теста не передан и не найден в "
-            f"{config.paths.fragments_path('test', labeled=True)}: полнота не проверена"
+            f"{config.paths.fragments_path('test', labeled=False)}: полнота не проверена"
         )
     return SubmissionReport(
         errors=tuple(errors),
@@ -265,8 +265,8 @@ def validate_submission(
 
 
 def expected_test_ids(config: BenchmarkConfig) -> list[str] | None:
-    """Идентификаторы тестовых фрагментов из файла организатора (ТЗ §7)."""
-    path = config.paths.fragments_path("test", labeled=True)
+    """Идентификаторы тестовых фрагментов из публичного файла без меток (§7)."""
+    path = config.paths.fragments_path("test", labeled=False)
     if not path.is_file():
         return None
     return pl.read_parquet(path, columns=["fragment_id"])["fragment_id"].to_list()

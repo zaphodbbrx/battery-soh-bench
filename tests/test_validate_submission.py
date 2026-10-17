@@ -208,10 +208,10 @@ def test_expected_ids_come_from_config(
     make_config: Callable[[dict[str, Any] | None], BenchmarkConfig],
     tmp_path: Path,
 ) -> None:
-    """Список fragment_id теста берётся из эталонного файла организатора."""
+    """ID тестовых фрагментов читаются из открытого файла без меток."""
     config = make_config()
     assert expected_test_ids(config) is None, "пока тест не сгенерирован"
-    path = config.paths.fragments_path("test", labeled=True)
+    path = config.paths.fragments_path("test", labeled=False)
     path.parent.mkdir(parents=True, exist_ok=True)
     pl.DataFrame(
         {

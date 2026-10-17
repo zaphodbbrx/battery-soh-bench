@@ -1,6 +1,12 @@
 # --- данные (ТЗ §3): наполняются скриптами, в репозиторий не попадают ---
 data/*
 !data/.gitkeep
+# Публичные наборы для участников контеста. Эталон test.parquet остаётся закрытым.
+!data/fragments/
+data/fragments/*
+!data/fragments/train.parquet
+!data/fragments/val.parquet
+!data/fragments/test_unlabeled.parquet
 
 # --- окружение ---
 .venv/
