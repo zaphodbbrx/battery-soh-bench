@@ -118,8 +118,8 @@ def _pr_submission(
     config: Any,
     expected_ids: list[str],
     truth: pl.DataFrame,
-) -> dict[str, Any]:
-    """Скачать и оценить CSV одного PR; содержимое трактуется только как данные."""
+) -> dict[str, Any] | None:
+    """Оценить CSV одного PR; PR без файла сабмита пропустить."""
     number = int(pr["number"])
     pr_url = pr["html_url"]
     files = _api_pages(f"/repos/{repo}/pulls/{number}/files?per_page=100", token=token)
@@ -129,6 +129,8 @@ def _pr_submission(
         if item.get("status") != "removed"
         and (match := SUBMISSION_PATTERN.fullmatch(item["filename"]))
     ]
+    if not candidates:
+        return None
     if len(candidates) != 1:
         return {
             "pr": number,
@@ -299,15 +301,19 @@ def main() -> int:
         raise SystemExit("В доверенной базовой ветке отсутствует test_unlabeled.parquet")
     open_prs = _api_pages(f"/repos/{repo}/pulls?state=open&base=main&per_page=100", token=token)
     results = [
-        _pr_submission(
-            repo,
-            pr,
-            token=token,
-            config=config,
-            expected_ids=expected_ids,
-            truth=truth,
-        )
+        result
         for pr in open_prs
+        if (
+            result := _pr_submission(
+                repo,
+                pr,
+                token=token,
+                config=config,
+                expected_ids=expected_ids,
+                truth=truth,
+            )
+        )
+        is not None
     ]
 
     for result in results:
