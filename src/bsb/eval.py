@@ -22,34 +22,11 @@ import numpy as np
 import polars as pl
 
 from bsb.config import BenchmarkConfig
-from bsb.store import read_cells
 
-__all__ = [
-    "evaluate",
-    "load_truth",
-    "render_report",
-    "run_eval",
-    "save_results",
-]
+__all__ = ["evaluate", "render_report", "save_results"]
 
 #: Доля, по которой считается «худший случай» в P95.
 P95 = 0.95
-
-
-def load_truth(config: BenchmarkConfig) -> pl.DataFrame:
-    """Эталон теста: метки из файла организатора плюс метаданные ячеек (§4.1).
-
-    Участникам этот файл не выдаётся: ``test_unlabeled.parquet`` не содержит
-    ни ``soh``, ни ``cell_id``.
-    """
-    path = config.paths.fragments_path("test", labeled=True)
-    if not path.is_file():
-        raise FileNotFoundError(
-            f"{path}: эталон теста не сгенерирован (bsb fragments --split test; фаза 7)"
-        )
-    fragments = pl.read_parquet(path)
-    cells = read_cells(config).select("cell_id", "chemistry", "temperature_setpoint_c", "dataset")
-    return fragments.join(cells, on="cell_id", how="left")
 
 
 def _metrics(
@@ -229,22 +206,3 @@ def save_results(result: dict[str, Any], path: str | Path) -> Path:
         json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8"
     )
     return out
-
-
-def run_eval(
-    config: BenchmarkConfig,
-    submission: pl.DataFrame,
-    *,
-    hard_mode: bool = False,
-    results_path: str | Path | None = None,
-) -> dict[str, Any]:
-    """Посчитать метрики и записать ``results.json``.
-
-    Размер файла сабмита (номинация «экономность», §10) добавляется вызывающей
-    стороной — здесь он неизвестен, потому что кадр уже в памяти.
-    """
-    truth = load_truth(config)
-    result = evaluate(submission, truth, config=config, hard_mode=hard_mode)
-    result["nominal_coverage"] = config.eval.calibration_coverage
-    save_results(result, results_path or config.paths.results_path)
-    return result
